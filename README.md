@@ -58,8 +58,14 @@ target\x86_64-pc-windows-msvc\release\ddraw-host.exe
 Place **both** files beside a 32-bit DirectDraw executable. The host must be
 x86_64; 32-bit D3DMetal does not exist.
 
-To cross-compile on macOS or Linux, put the LLVM-MinGW UCRT toolchain's `bin`
-directory on PATH and run:
+CI (`.github/workflows/build.yml`) builds both targets on **Ubuntu** with the
+**LLVM-MinGW UCRT** toolchain and the `i686-pc-windows-gnullvm` /
+`x86_64-pc-windows-gnullvm` Rust targets. No Windows runner is required for the
+build. The gnullvm build produces `ddraw.dll` and `ddraw-host.exe`; it does not
+produce a PDB.
+
+To cross-compile locally on macOS or Linux, put the LLVM-MinGW UCRT toolchain's
+`bin` directory on PATH and run:
 
 ```sh
 rustup target add i686-pc-windows-gnullvm x86_64-pc-windows-gnullvm

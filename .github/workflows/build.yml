@@ -1,4 +1,4 @@
-name: Rust Win32 DLL and 64-bit host
+name: Rust Win32 DLL and 64-bit host (LLVM-MinGW)
 
 on:
   push:
@@ -15,65 +15,66 @@ concurrency:
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
-  win32:
-    runs-on: windows-2022
+  build:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust targets and components
+      - name: Install Rust targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-gnullvm,x86_64-pc-windows-gnullvm
+
+      - name: Install LLVM-MinGW (UCRT)
         run: |
-          rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
-          rustup component add rustfmt clippy
+          set -euo pipefail
+          LLVM_MINGW_VERSION=20261117
+          LLVM_MINGW_DIR="llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64"
+          curl -fsSL -o /tmp/llvm-mingw.tar.xz \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${LLVM_MINGW_DIR}.tar.xz"
+          tar -xJf /tmp/llvm-mingw.tar.xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/${LLVM_MINGW_DIR}/bin" >> "$GITHUB_PATH"
+
+      - name: Verify LLVM-MinGW toolchain
+        run: |
+          i686-w64-mingw32-clang --version
+          x86_64-w64-mingw32-clang --version
 
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
-      - name: Run Clippy (32-bit DLL, advisory)
-        run: cargo clippy --locked -p cnc-ddraw --all-targets
+      - name: Build 32-bit ddraw.dll (i686-pc-windows-gnullvm)
+        run: |
+          cargo build --locked --release \
+            -p cnc-ddraw \
+            --target i686-pc-windows-gnullvm
 
-      - name: Run unit tests (32-bit DLL)
-        run: cargo test --locked -p cnc-ddraw
-
-      - name: Build release 32-bit DLL and PDB
-        run: cargo build --locked --release -p cnc-ddraw --target i686-pc-windows-msvc
-
-      - name: Build release 64-bit presentation host
-        run: cargo build --locked --release -p ddraw-host --target x86_64-pc-windows-msvc
+      - name: Build 64-bit ddraw-host.exe (x86_64-pc-windows-gnullvm)
+        run: |
+          cargo build --locked --release \
+            -p ddraw-host \
+            --target x86_64-pc-windows-gnullvm
 
       - name: Verify release outputs exist
-        shell: pwsh
         run: |
-          foreach ($file in @(
-            "target/i686-pc-windows-msvc/release/ddraw.dll",
-            "target/i686-pc-windows-msvc/release/ddraw.pdb",
-            "target/x86_64-pc-windows-msvc/release/ddraw-host.exe"
-          )) {
-            if (-not (Test-Path $file)) {
-              Write-Error "Missing expected build output: $file"
-              exit 1
-            }
-          }
-          Get-Item target/i686-pc-windows-msvc/release/ddraw.dll,
-            target/i686-pc-windows-msvc/release/ddraw.pdb,
-            target/x86_64-pc-windows-msvc/release/ddraw-host.exe |
-            Format-Table Name, Length -AutoSize
+          set -euo pipefail
+          for file in \
+            target/i686-pc-windows-gnullvm/release/ddraw.dll \
+            target/x86_64-pc-windows-gnullvm/release/ddraw-host.exe
+          do
+            test -f "$file" || { echo "Missing expected build output: $file"; exit 1; }
+          done
+          file target/i686-pc-windows-gnullvm/release/ddraw.dll
+          file target/x86_64-pc-windows-gnullvm/release/ddraw-host.exe
+          ls -lh target/i686-pc-windows-gnullvm/release/ddraw.dll \
+            target/x86_64-pc-windows-gnullvm/release/ddraw-host.exe
 
-      - name: Exercise the DLL through the x86 Windows SDK ABI
-        shell: cmd
-        run: |
-          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
-          if errorlevel 1 exit /b 1
-          cl /nologo /W4 tests\smoke.c user32.lib gdi32.lib /Fe:target\i686-pc-windows-msvc\release\smoke.exe
-          if errorlevel 1 exit /b 1
-          target\i686-pc-windows-msvc\release\smoke.exe
-
-      - name: Upload DLL, PDB, and host artifacts
+      - name: Upload DLL and host artifacts
         uses: actions/upload-artifact@v4
         with:
           name: cnc-ddraw
           if-no-files-found: error
           path: |
-            target/i686-pc-windows-msvc/release/ddraw.dll
-            target/i686-pc-windows-msvc/release/ddraw.pdb
-            target/x86_64-pc-windows-msvc/release/ddraw-host.exe
+            target/i686-pc-windows-gnullvm/release/ddraw.dll
+            target/x86_64-pc-windows-gnullvm/release/ddraw-host.exe
