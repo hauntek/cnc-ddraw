@@ -44,8 +44,8 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --target i686-pc-windows-gnullvm --all-targets -- -D warnings
 
-      - name: Run unit tests
-        run: cargo test --locked --target i686-pc-windows-gnullvm
+      - name: Build unit tests (cross-compiled, not run)
+        run: cargo test --locked --target i686-pc-windows-gnullvm --no-run
 
       - name: Build release DLL
         run: cargo build --locked --release --target i686-pc-windows-gnullvm
