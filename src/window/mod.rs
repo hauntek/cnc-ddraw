@@ -139,14 +139,13 @@ pub fn bind_window(hwnd: HWND, scaling_active: bool) -> usize {
         (client.bottom - client.top).max(0) as u32,
     );
     BOUND_CLIENT.store(((cw & 0xffff) << 16) | (ch & 0xffff), Ordering::Relaxed);
-    if scaling_active {
-        crate::compat::log_msg(&format!(
-            "bind: hwnd=0x{:x} provisional client={}x{}",
-            hwnd.0 as usize,
-            cw,
-            ch
-        ));
-    }
+    crate::compat::log_msg(&format!(
+        "bind: hwnd=0x{:x} client={}x{} windowscale={}",
+        hwnd.0 as usize,
+        cw,
+        ch,
+        scaling_active
+    ));
     hooks::install_iat_hooks();
     hooks::install_subclass(hwnd);
     hooks::install_getmsg_hook(tid);

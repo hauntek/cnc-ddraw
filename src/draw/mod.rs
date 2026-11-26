@@ -533,6 +533,18 @@ impl IDirectDraw_Impl for Draw_Impl {
         // SetWindowPos synchronously calls the game's WndProc, which may re-enter us.
         let _transition = WindowTransitionGuard::acquire(&self.changing_window)?;
         let manage_window = exclusive && !no_window_changes;
+        let cfg = config::get();
+        // Overlay scaling keeps the game window at the game's own resolution and lets the
+        // presenter's overlay window show it scaled up. Every coordinate the game reads then stays
+        // native, which is what keeps real Win32 dialogs, their controls and the game's own art in
+        // the same space - virtualizing a scaled client cannot do that.
+        let windowscale = cfg.windowscale_enabled();
+        let mut window_cfg = cfg.clone();
+        if !windowscale {
+            // Zero means "use the surface size" in `apply_windowed`.
+            window_cfg.width = 0;
+            window_cfg.height = 0;
+        }
         let change_hwnd = self.current_hwnd() != hwnd;
         {
             let display = self.display.lock();
@@ -570,7 +582,7 @@ impl IDirectDraw_Impl for Draw_Impl {
                 self.bind_id.store(0, Ordering::Release);
             } else {
                 compat::apply_single_cpu_affinity();
-                let id = window::bind_window(hwnd, exclusive);
+                let id = window::bind_window(hwnd, exclusive && windowscale);
                 self.bind_id.store(id, Ordering::Release);
                 set_active_display(&self.display);
             }
@@ -578,13 +590,30 @@ impl IDirectDraw_Impl for Draw_Impl {
             window::set_scaling_active(self.bind_id.load(Ordering::Acquire), exclusive);
         }
         if manage_window {
-            let cfg = config::get();
-            let initial_mode = if cfg.windowed {
-                PresentationMode::Windowed
-            } else {
+            let initial_mode = if windowscale && !cfg.windowed {
                 PresentationMode::BorderlessFullscreen
+            } else {
+                PresentationMode::Windowed
             };
-            let host = HostWindow::enter(hwnd, initial_mode, display.width, display.height, cfg)?;
+            // Overlay scaling keeps the window at the size the game created it with, so the game
+            // never observes a client size it did not ask for.
+            let (mut logical_w, mut logical_h) = (display.width, display.height);
+            if !windowscale {
+                if let Ok(rc) = crate::win32::geometry::client_rect(hwnd) {
+                    let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
+                    if w > 0 && h > 0 {
+                        logical_w = w as u32;
+                        logical_h = h as u32;
+                    }
+                }
+            }
+            let host = HostWindow::enter(
+                hwnd,
+                initial_mode,
+                logical_w,
+                logical_h,
+                &window_cfg,
+            )?;
             display.set_host(Some(host));
         }
         let _ = self.display.present_locked(display);
@@ -605,25 +634,35 @@ impl IDirectDraw_Impl for Draw_Impl {
         // Publish the logical size *before* the window is resized: the resize below sends
         // `WM_SIZE`/`WM_WINDOWPOSCHANGED` with the real client size, and a game that caches those
         // would keep scaling its mouse maths by the real window size forever after.
-        let scaling = self.exclusive.load(Ordering::Acquire) && !hwnd.is_invalid();
+        let windowscale = cfg.windowscale_enabled();
+        let mut window_cfg = cfg.clone();
+        if !windowscale {
+            // Zero means "use the surface size" in `apply_windowed`.
+            window_cfg.width = 0;
+            window_cfg.height = 0;
+        }
+        let scaling =
+            self.exclusive.load(Ordering::Acquire) && !hwnd.is_invalid() && windowscale;
         if scaling {
             // `set_scaling_active` clears the mode flag, so arm scaling first and re-arm the mode.
             window::set_scaling_active(self.bind_id.load(Ordering::Acquire), true);
         }
         window::set_mode(width, height, bpp, true);
-        if scaling {
+        if self.exclusive.load(Ordering::Acquire) && !hwnd.is_invalid() {
             if self.manage_window.load(Ordering::Acquire) && display.presentation.host.is_none() {
-                let mode = if cfg.windowed {
-                    PresentationMode::Windowed
-                } else {
+                let mode = if windowscale && !cfg.windowed {
                     PresentationMode::BorderlessFullscreen
+                } else {
+                    PresentationMode::Windowed
                 };
-                let host = HostWindow::enter(hwnd, mode, width, height, cfg)?;
+                let host = HostWindow::enter(hwnd, mode, width, height, &window_cfg)?;
                 display.set_host(Some(host));
             } else if let Some(host) = display.presentation.host.as_mut() {
-                host.on_logical_mode_changed(width, height, cfg);
+                host.on_logical_mode_changed(width, height, &window_cfg);
             }
-            window::set_scaling_active(self.bind_id.load(Ordering::Acquire), true);
+            if scaling {
+                window::set_scaling_active(self.bind_id.load(Ordering::Acquire), true);
+            }
         }
         (display.width, display.height, display.bpp) = (width, height, bpp);
         self.display.store_mode(width, height, bpp);

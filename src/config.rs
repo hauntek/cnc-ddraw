@@ -37,6 +37,11 @@ pub struct Config {
     pub pos_x: Option<i32>,
     pub pos_y: Option<i32>,
     pub maintas: bool,
+    /// `false` keeps the game window at the game's own resolution and lets the presenter's
+    /// overlay window show it scaled up. That keeps every coordinate the game sees native, which
+    /// is the only way real Win32 dialogs and their controls stay aligned with the game's own art.
+    /// Unset means "on for the in-process presenter, off for the 64-bit host".
+    pub windowscale: Option<bool>,
     pub vsync: bool,
     pub maxfps: i32,
     pub renderer: RendererBackend,
@@ -58,6 +63,7 @@ impl Default for Config {
             pos_x: None,
             pos_y: None,
             maintas: true,
+            windowscale: None,
             vsync: false,
             maxfps: 0,
             renderer: RendererBackend::Auto,
@@ -95,6 +101,13 @@ impl Config {
         } else {
             4
         }
+    }
+
+    /// Whether the game window itself is resized and its coordinates virtualized. The host
+    /// presenter defaults to overlay scaling, everything else to a scaled window.
+    pub fn windowscale_enabled(&self) -> bool {
+        self.windowscale
+            .unwrap_or(self.presenter != PresenterMode::Host)
     }
 
     pub fn for_executable(exe_stem: Option<&str>) -> Self {
@@ -195,6 +208,11 @@ impl Config {
             "maintas" => {
                 if let Some(b) = parse_bool(value) {
                     self.maintas = b;
+                }
+            }
+            "windowscale" => {
+                if let Some(b) = parse_bool(value) {
+                    self.windowscale = Some(b);
                 }
             }
             "vsync" => {

@@ -178,15 +178,26 @@ impl FrameSink {
             .collect();
         let maintas = u8::from(config::get().maintas);
         let vsync = u8::from(config::get().vsync);
+        // In overlay-scaling mode the game window keeps the game's resolution, so tell the host how
+        // big the picture the player should see is; it sizes and centres its overlay window on the
+        // game window and rescales the frame into it.
+        let cfg = config::get();
+        let (overlay_w, overlay_h) = if !cfg.windowscale_enabled() && cfg.width > 0 && cfg.height > 0 {
+            (cfg.width, cfg.height)
+        } else {
+            (0, 0)
+        };
         let command = format!(
-            "\"{}\" --base {} --hwnd {:x} --pid {} --backend {} --maintas {} --vsync {}",
+            "\"{}\" --base {} --hwnd {:x} --pid {} --backend {} --maintas {} --vsync {} --width {} --height {}",
             host.display(),
             base,
             hwnd.0 as usize,
             pid,
             backend_name(),
             maintas,
-            vsync
+            vsync,
+            overlay_w,
+            overlay_h
         );
         let mut command: Vec<u16> = command
             .encode_utf16()
