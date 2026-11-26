@@ -17,14 +17,15 @@ use std::sync::atomic::Ordering;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_SYNCHRONIZE, SetEvent, WaitForSingleObject,
+    GetCurrentProcessId, OpenProcess, PROCESS_SYNCHRONIZE, SetEvent, WaitForSingleObject,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, IsWindowEnabled, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowRect,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW, WindowFromPoint,
+    GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetParent,
+    GetWindowRect, GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW,
+    WindowFromPoint,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
     WM_RBUTTONUP, GUITHREADINFO,
 };
@@ -32,6 +33,27 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use ddraw_protocol as protocol;
 use overlay::Overlay;
 use presenter::Presenter;
+
+/// Describes a window well enough to tell apart "the game", "our overlay" and
+/// "something else that is sitting on top of the game".
+fn window_label(hwnd: HWND) -> String {
+    // SAFETY: both calls only read the handle; `GetClassNameW` writes at most
+    // `class.len()` UTF-16 units into our buffer.
+    unsafe {
+        let mut class = [0u16; 64];
+        let len = GetClassNameW(hwnd, &mut class).max(0) as usize;
+        let class = String::from_utf16_lossy(&class[..len.min(class.len())]);
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let parent = GetParent(hwnd);
+        let own = GetCurrentProcessId();
+        format!(
+            "class=\"{class}\" pid={pid}{} parent=0x{:x}",
+            if pid == own { " (host)" } else { "" },
+            parent.0 as usize
+        )
+    }
+}
 
 /// Diagnostic: records where mouse input actually goes. Polled every loop
 /// iteration (two cheap Win32 calls) and only logs when something changes.
@@ -55,8 +77,13 @@ impl InputProbe {
             if self.last_hit != Some(hit_id) {
                 self.last_hit = Some(hit_id);
                 logging::log_msg(&format!(
-                    "hit probe: cursor=({},{}) hit=0x{:x} game=0x{:x} overlay=0x{:x}",
-                    cursor.x, cursor.y, hit.0 as usize, game.0 as usize, overlay.0 as usize
+                    "hit probe: cursor=({},{}) hit=0x{:x} {} game=0x{:x} overlay=0x{:x}",
+                    cursor.x,
+                    cursor.y,
+                    hit.0 as usize,
+                    window_label(hit),
+                    game.0 as usize,
+                    overlay.0 as usize
                 ));
             }
 
@@ -87,12 +114,13 @@ impl InputProbe {
             let gui_ok = GetGUIThreadInfo(thread, &mut gui).is_ok();
 
             logging::log_msg(&format!(
-                "click probe: cursor=({},{}) hit=0x{:x} game=0x{:x} overlay=0x{:x} fg=0x{:x} \
+                "click probe: cursor=({},{}) hit=0x{:x} {} game=0x{:x} overlay=0x{:x} fg=0x{:x} \
                  enabled={} visible={} client=({},{} {}x{}) overlay_rect=({},{} {}x{}) \
                  active=0x{:x} focus=0x{:x} capture=0x{:x} gui_ok={}",
                 cursor.x,
                 cursor.y,
                 hit.0 as usize,
+                window_label(hit),
                 game.0 as usize,
                 overlay.0 as usize,
                 foreground.0 as usize,
