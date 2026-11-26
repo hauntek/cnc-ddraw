@@ -16,20 +16,23 @@ concurrency:
 
 jobs:
   win32:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust i686-pc-windows-gnullvm target and components
+      - name: Install Rust target and components
         run: |
           rustup target add i686-pc-windows-gnullvm
           rustup component add rustfmt clippy
 
-      - name: Install llvm-mingw via Homebrew
+      - name: Install llvm-mingw
         run: |
-          brew install llvm-mingw
-          # Homebrew 安装的 llvm-mingw 通常链接到 /opt/homebrew/opt/llvm-mingw/bin
-          echo "/opt/homebrew/opt/llvm-mingw/bin" >> $GITHUB_PATH
+          LLVM_MINGW_VERSION="20240606"
+          LLVM_MINGW_NAME="llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64"
+          curl -L -o "${LLVM_MINGW_NAME}.tar.xz" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${LLVM_MINGW_NAME}.tar.xz"
+          tar -xf "${LLVM_MINGW_NAME}.tar.xz"
+          echo "${PWD}/${LLVM_MINGW_NAME}/bin" >> $GITHUB_PATH
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -47,14 +50,15 @@ jobs:
       - name: Build release DLL
         run: cargo build --locked --release --target i686-pc-windows-gnullvm
 
-      - name: Verify release output exists
+      - name: Verify output is a 32-bit PE DLL
         run: |
           file="target/i686-pc-windows-gnullvm/release/ddraw.dll"
           if [ ! -f "$file" ]; then
             echo "Missing expected build output: $file"
             exit 1
           fi
-          ls -lh "$file"
+          file "$file"
+          file "$file" | grep -q "PE32" || { echo "Not a 32-bit PE file!"; exit 1; }
 
       - name: Upload DLL artifact
         uses: actions/upload-artifact@v4
