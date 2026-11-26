@@ -17,8 +17,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetForegroundWindow, HTCLIENT, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible,
-    MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowPos, ShowWindow, TranslateMessage,
+    GWLP_HWNDPARENT, MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateMessage,
     WM_ERASEBKGND, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_NCHITTEST,
     WM_PAINT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
@@ -142,7 +143,9 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    pub fn new() -> Result<Self, String> {
+    /// Creates the overlay. `owner` should be the game window: an owned window never gets a
+    /// taskbar button, and it also stays above its owner in the z-order.
+    pub fn new(owner: Option<HWND>) -> Result<Self, String> {
         // SAFETY: GetModuleHandleW(None) returns the current module and takes
         // no borrowed pointers.
         let module =
@@ -172,13 +175,27 @@ impl Overlay {
                 0,
                 1,
                 1,
-                None,
+                owner,
                 None,
                 Some(hinstance),
                 None,
             )
         }
         .map_err(|err| format!("CreateWindowExW: {err}"))?;
+        // Belt and braces: `WS_EX_TOOLWINDOW` alone does not always keep a window out of the
+        // taskbar under Wine, but an owned window never gets a button. Re-assert the owner here
+        // in case the creation-time parent was ignored.
+        if let Some(owner) = owner {
+            // SAFETY: `hwnd` is the live overlay window and the owner is a valid window handle.
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
+            }
+        }
+        crate::logging::log_msg(&format!(
+            "overlay: hwnd=0x{:x} owner={} toolwindow=yes",
+            hwnd.0 as usize,
+            owner.map_or("none".to_string(), |o| format!("0x{:x}", o.0 as usize))
+        ));
 
         Ok(Self {
             hwnd,

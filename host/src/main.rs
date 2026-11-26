@@ -325,7 +325,9 @@ fn run() -> Result<(), String> {
 
     // Declaration order matters: `presenter` is declared after `overlay` and
     // therefore dropped before it, so the wgpu surface dies before the HWND.
-    let mut overlay = Overlay::new()?;
+    // Own the overlay by the game window so it never appears in the taskbar (and stays above it).
+    let overlay_owner = (!game.is_invalid()).then_some(game);
+    let mut overlay = Overlay::new(overlay_owner)?;
     // Anything the overlay receives that belongs to the game (because Wine
     // routed the click to the topmost window instead of the game below it) is
     // forwarded to the game window.
