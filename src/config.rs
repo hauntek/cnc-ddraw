@@ -14,6 +14,19 @@ pub enum RendererBackend {
     Vulkan,
 }
 
+/// Where presentation happens.
+///
+/// `Host` starts the 64-bit `ddraw-host.exe` and sends it frames through shared
+/// memory (the D3DMetal path on macOS Wine). `InProc` keeps the legacy 32-bit
+/// wgpu renderer. `Auto` uses the host only on Wine when the host executable is
+/// present, so native Windows keeps the existing path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresenterMode {
+    Auto,
+    Host,
+    InProc,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub windowed: bool,
@@ -27,6 +40,7 @@ pub struct Config {
     pub vsync: bool,
     pub maxfps: i32,
     pub renderer: RendererBackend,
+    pub presenter: PresenterMode,
     pub toggle_fullscreen_vk: u32,
     pub singlecpu: bool,
     pub noactivateapp: bool,
@@ -47,6 +61,7 @@ impl Default for Config {
             vsync: false,
             maxfps: 0,
             renderer: RendererBackend::Auto,
+            presenter: PresenterMode::Auto,
             toggle_fullscreen_vk: VK_RETURN_CODE,
             singlecpu: true,
             noactivateapp: false,
@@ -199,6 +214,13 @@ impl Config {
                     _ => RendererBackend::Auto,
                 };
             }
+            "presenter" => {
+                self.presenter = match value.to_ascii_lowercase().as_str() {
+                    "host" | "remote" | "64" => PresenterMode::Host,
+                    "inproc" | "in-process" | "32" => PresenterMode::InProc,
+                    _ => PresenterMode::Auto,
+                };
+            }
             "keytogglefullscreen" => {
                 if let Some(vk) = parse_u32_radix(value) {
                     self.toggle_fullscreen_vk = vk;
@@ -315,6 +337,7 @@ mod tests {
             [game]
             border = true
             renderer = dx12
+            presenter = host
             width = 1024
         "#;
         let cfg = Config::parse_ini(ini, Some("game"));
@@ -330,6 +353,7 @@ mod tests {
         assert_eq!(cfg.maxfps, 60);
         assert_eq!(cfg.min_frame_interval_ms(), 16);
         assert_eq!(cfg.renderer, RendererBackend::Dx12);
+        assert_eq!(cfg.presenter, PresenterMode::Host);
         assert_eq!(cfg.toggle_fullscreen_vk, 0x0D);
         assert!(cfg.singlecpu);
         assert!(cfg.noactivateapp);
@@ -347,6 +371,7 @@ mod tests {
         assert!(!cfg.noactivateapp);
         assert_eq!(cfg.min_frame_interval_ms(), 4);
         assert_eq!(cfg.renderer, RendererBackend::Auto);
+        assert_eq!(cfg.presenter, PresenterMode::Auto);
         assert_eq!(cfg.toggle_fullscreen_vk, 0x0D);
     }
 

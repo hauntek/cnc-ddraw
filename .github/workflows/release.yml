@@ -21,7 +21,7 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
-          name: cnc-ddraw-i686
+          name: cnc-ddraw
           path: dist
 
       - name: Prepare release assets
@@ -30,7 +30,9 @@ jobs:
           set -euo pipefail
           ls -la dist
           test -f dist/ddraw.dll
-          (cd dist && sha256sum ddraw.dll > SHA256SUMS.txt)
+          test -f dist/ddraw.pdb
+          test -f dist/ddraw-host.exe
+          (cd dist && sha256sum ddraw.dll ddraw.pdb ddraw-host.exe > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
 
       - name: Create GitHub Release
@@ -41,4 +43,6 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/ddraw.dll
+            dist/ddraw.pdb
+            dist/ddraw-host.exe
             dist/SHA256SUMS.txt

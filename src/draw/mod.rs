@@ -543,11 +543,6 @@ impl IDirectDraw_Impl for Draw_Impl {
                 return Ok(());
             }
         }
-        let replacement = if change_hwnd && !hwnd.is_invalid() {
-            Some(Renderer::new(hwnd.0 as isize).map_err(|message| Error::new(E_FAIL, message))?)
-        } else {
-            None
-        };
         let mut display = self.display.lock();
         if let Some(saved) = display.set_host(None) {
             saved.restore()?;
@@ -566,7 +561,12 @@ impl IDirectDraw_Impl for Draw_Impl {
         self.manage_window.store(manage_window, Ordering::Release);
         if change_hwnd {
             display.presentation.bound_hwnd = make_hwnd(hwnd);
-            display.presentation.renderer = replacement;
+            // Renderer and 64-bit host are created lazily on the first present.
+            // This keeps SetCooperativeLevel from initialising a 32-bit GPU
+            // device on macOS, where the 64-bit host owns D3DMetal.
+            display.presentation.renderer = None;
+            display.presentation.sink = None;
+            display.presentation.host_failed = false;
             display.consecutive_present_failures = 0;
             self.hwnd.store((!hwnd.is_invalid()).then_some(hwnd));
             self.cached_hz.store(0, Ordering::Relaxed);

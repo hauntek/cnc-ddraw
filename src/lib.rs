@@ -13,6 +13,7 @@ mod draw;
 mod exports;
 mod ffi;
 mod palette;
+mod remote;
 mod renderer;
 mod simd_blit;
 mod surface;

@@ -9,7 +9,12 @@ publish = false
 name = "ddraw"
 crate-type = ["cdylib"]
 
+[workspace]
+members = ["host", "protocol"]
+resolver = "2"
+
 [dependencies]
+ddraw-protocol = { path = "protocol" }
 fearless_simd = "1.2.0"
 parking_lot = "0.12"
 pollster = "0.4"
@@ -20,6 +25,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_DirectDraw",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",

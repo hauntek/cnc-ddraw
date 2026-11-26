@@ -11,6 +11,8 @@ use windows::Win32::Foundation::{E_FAIL, HWND};
 use windows::Win32::Graphics::DirectDraw::*;
 use windows::Win32::Graphics::Gdi::HDC;
 
+use crate::config::PresenterMode;
+use crate::remote::{self, FrameSink};
 use crate::renderer::{PresentError, PresentOutcome, Renderer};
 use crate::surface::{self, SurfaceSlot};
 use crate::win32::hwnd::SendHwnd;
@@ -326,7 +328,9 @@ pub struct Display {
 pub(super) struct Presentation {
     pub(super) bound_hwnd: SendHwnd,
     pub(super) renderer: Option<Renderer>,
+    pub(super) sink: Option<FrameSink>,
     pub(super) host: Option<HostWindow>,
+    pub(super) host_failed: bool,
 }
 
 impl Display {
@@ -352,22 +356,76 @@ impl Display {
             shared.flush_scheduled.store(false, Ordering::Release);
             return Ok(());
         };
-        if self.presentation.renderer.is_none() {
+
+        if self.presentation.sink.is_none() && self.presentation.renderer.is_none() {
             let hwnd = self.presentation.bound_hwnd.get();
             if !window::is_window(hwnd) {
                 shared.dirty.store(false, Ordering::Release);
                 shared.flush_scheduled.store(false, Ordering::Release);
                 return Ok(());
             }
-            match Renderer::new(hwnd.0 as isize) {
-                Ok(renderer) => {
-                    self.presentation.renderer = Some(renderer);
+
+            if remote::use_host_presenter() && !self.presentation.host_failed {
+                match FrameSink::start(hwnd) {
+                    Ok(sink) => {
+                        self.presentation.sink = Some(sink);
+                        self.consecutive_present_failures = 0;
+                        compat::log_msg("attached 64-bit ddraw-host presenter");
+                    }
+                    Err(err) => {
+                        self.presentation.host_failed = true;
+                        compat::log_msg(&format!("64-bit presenter unavailable: {err}"));
+                    }
+                }
+            }
+
+            // Legacy 32-bit wgpu path. It is the automatic fallback on native
+            // Windows and on Wine when ddraw-host.exe is absent; `presenter=host`
+            // never creates it, so the 32-bit process stays GPU-free on macOS.
+            if self.presentation.sink.is_none()
+                && config::get().presenter != PresenterMode::Host
+            {
+                match Renderer::new(hwnd.0 as isize) {
+                    Ok(renderer) => {
+                        self.presentation.renderer = Some(renderer);
+                        self.consecutive_present_failures = 0;
+                        compat::log_msg("created legacy 32-bit wgpu renderer");
+                    }
+                    Err(err) => {
+                        compat::log_msg(&format!("renderer create deferred: {err}"));
+                        shared.dirty.store(true, Ordering::Release);
+                        window::arm_flush_timer(50);
+                        return Ok(());
+                    }
+                }
+            }
+
+            if self.presentation.sink.is_none() && self.presentation.renderer.is_none() {
+                shared.dirty.store(true, Ordering::Release);
+                shared.flush_scheduled.store(false, Ordering::Release);
+                window::arm_flush_timer(50);
+                return Ok(());
+            }
+        }
+
+        if let Some(sink) = self.presentation.sink.take() {
+            match sink.submit(primary, || {
+                // Clear dirty while still holding the primary surface mutex.
+                shared.dirty.store(false, Ordering::Release);
+            }) {
+                Ok(()) => {
+                    self.presentation.sink = Some(sink);
+                    shared.flush_scheduled.store(false, Ordering::Release);
                     self.consecutive_present_failures = 0;
-                    compat::log_msg("recreated wgpu renderer after device/surface loss");
+                    self.last_present = Some(Instant::now());
+                    window::disarm_flush_timer();
+                    return Ok(());
                 }
                 Err(err) => {
-                    compat::log_msg(&format!("renderer recreate deferred: {err}"));
+                    compat::log_msg(&format!("64-bit presenter submit failed: {err}"));
+                    self.presentation.host_failed = true;
                     shared.dirty.store(true, Ordering::Release);
+                    shared.flush_scheduled.store(false, Ordering::Release);
                     window::arm_flush_timer(50);
                     return Ok(());
                 }
