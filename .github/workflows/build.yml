@@ -20,9 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust i686 target and components
+      - name: Install Rust i686-pc-windows-gnullvm target and components
         run: |
-          rustup target add i686-pc-windows-msvc
+          rustup target add i686-pc-windows-gnullvm
           rustup component add rustfmt clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -33,43 +33,36 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --target i686-pc-windows-gnullvm --all-targets -- -D warnings
 
       - name: Run unit tests
-        run: cargo test --locked
+        run: cargo test --locked --target i686-pc-windows-gnullvm
 
-      - name: Build release DLL and PDB
-        run: cargo build --locked --release
+      - name: Build release DLL
+        run: cargo build --locked --release --target i686-pc-windows-gnullvm
 
-      - name: Verify release outputs exist
+      - name: Verify release output exists
         shell: pwsh
         run: |
-          foreach ($file in @(
-            "target/i686-pc-windows-msvc/release/ddraw.dll",
-            "target/i686-pc-windows-msvc/release/ddraw.pdb"
-          )) {
-            if (-not (Test-Path $file)) {
-              Write-Error "Missing expected build output: $file"
-              exit 1
-            }
+          $file = "target/i686-pc-windows-gnullvm/release/ddraw.dll"
+          if (-not (Test-Path $file)) {
+            Write-Error "Missing expected build output: $file"
+            exit 1
           }
-          Get-Item target/i686-pc-windows-msvc/release/ddraw.dll, target/i686-pc-windows-msvc/release/ddraw.pdb |
-            Format-Table Name, Length -AutoSize
+          Get-Item $file | Format-Table Name, Length -AutoSize
 
       - name: Exercise the DLL through the x86 Windows SDK ABI
         shell: cmd
         run: |
           call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
           if errorlevel 1 exit /b 1
-          cl /nologo /W4 tests\smoke.c user32.lib gdi32.lib /Fe:target\i686-pc-windows-msvc\release\smoke.exe
+          cl /nologo /W4 tests\smoke.c user32.lib gdi32.lib /Fe:target\i686-pc-windows-gnullvm\release\smoke.exe
           if errorlevel 1 exit /b 1
-          target\i686-pc-windows-msvc\release\smoke.exe
+          target\i686-pc-windows-gnullvm\release\smoke.exe
 
-      - name: Upload DLL and PDB artifacts
+      - name: Upload DLL artifact
         uses: actions/upload-artifact@v4
         with:
           name: cnc-ddraw-i686
           if-no-files-found: error
-          path: |
-            target/i686-pc-windows-msvc/release/ddraw.dll
-            target/i686-pc-windows-msvc/release/ddraw.pdb
+          path: target/i686-pc-windows-gnullvm/release/ddraw.dll
