@@ -56,8 +56,18 @@ impl UploadedFrame {
         device: &wgpu::Device,
         frame_layout: &wgpu::BindGroupLayout,
         size: wgpu::Extent3d,
+        srgb: bool,
     ) -> Self {
-        let raw_format = wgpu::TextureFormat::Rgba8Unorm;
+        // The game's bytes are already display-encoded. An sRGB texture decodes
+        // them to linear on read, and the sRGB swapchain view re-encodes them on
+        // write, so the exact same bytes reach the screen. Using a non-sRGB
+        // texture skipped the decode and the write applied a second sRGB
+        // encode, which is why the picture came out washed out.
+        let raw_format = if srgb {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
         let raw_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("DirectDraw RGBA primary"),
             size,
@@ -350,12 +360,11 @@ impl Presenter {
         let const_fs = std::env::var_os("CNC_DDRAW_HOST_CONST_FS").is_some();
         let const_nobind = std::env::var_os("CNC_DDRAW_HOST_CONST_NOBIND").is_some();
         let full_viewport = std::env::var_os("CNC_DDRAW_HOST_FULL_VIEWPORT").is_some();
-        // Default to the copy path: on wgpu-DX12/D3DMetal a draw through a
-        // pipeline that declares a bind group produces no pixels at all, even
-        // when the fragment shader ignores the bound resources. `CNC_DDRAW_HOST_GPU=1`
-        // re-enables the textured render-pipeline path for platforms where it
-        // works.
-        let blit = std::env::var_os("CNC_DDRAW_HOST_GPU").is_none();
+        // The render-pipeline path is the default: the GPU does the scaling and
+        // the CPU only converts the frame. `CNC_DDRAW_HOST_BLIT=1` falls back to
+        // the CPU nearest-neighbour upscale plus `copy_texture_to_texture`, which
+        // needs no pipeline at all.
+        let blit = std::env::var_os("CNC_DDRAW_HOST_BLIT").is_some();
         logging::log_msg(&format!(
             "presenter init: format={:?} blit={blit} clear_only={clear_only} solid={solid} solid_draw={solid_draw} const_fs={const_fs} const_nobind={const_nobind} full_viewport={full_viewport}",
             surface_cfg.format
@@ -458,15 +467,20 @@ impl Presenter {
             // texture.
             self.frame = None;
         } else {
-            if self
-                .frame
-                .as_ref()
-                .is_some_and(|frame| frame.raw_texture.size() != size)
-            {
+            let srgb = self.config.format.is_srgb();
+            if self.frame.as_ref().is_some_and(|frame| {
+                frame.raw_texture.size() != size
+                    || frame.raw_texture.format().is_srgb() != srgb
+            }) {
                 self.frame = None;
             }
             if self.frame.is_none() {
-                self.frame = Some(UploadedFrame::new(&self.device, &self.frame_layout, size));
+                self.frame = Some(UploadedFrame::new(
+                    &self.device,
+                    &self.frame_layout,
+                    size,
+                    srgb,
+                ));
             }
         }
 

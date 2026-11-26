@@ -164,8 +164,8 @@ windowed mode.
   renders nothing), while the same fullscreen triangle drawn with an empty
   pipeline layout works.
 
-  `CNC_DDRAW_HOST_GPU=1` selects the textured render-pipeline path instead:
-  `host/src/present.wgsl` samples an `Rgba8Unorm` frame with `textureLoad` from
+  The render-pipeline path (the default) has
+  `host/src/present.wgsl` sample an `Rgba8Unorm`/`Rgba8UnormSrgb` frame with `textureLoad` from
   `@builtin(position)`, with texture size and viewport origin in a small uniform
   buffer, so it never calls `textureDimensions()`. There is deliberately no
   sampler binding: naga's HLSL backend turns a sampler into a sampler-heap
@@ -173,18 +173,20 @@ windowed mode.
 
   The vertex stage must return `@builtin(position)` directly. A version that
   returned a struct with a `@location(0)` varying produced a draw that D3DMetal
-  silently dropped: it rendered nothing even with an empty pipeline layout, no
+  rendered nothing on D3DMetal: no pixels even with an empty pipeline layout, no
   bind group and a constant-colour fragment shader, while `solid.wgsl` - same
   vertex math, no varying - drew normally. wgpu reported no validation error
-  either way, so the rejection happens in the Metal translation, not in wgpu.
+  either way, so the mismatch only becomes visible once the generated HLSL
+  output signature reaches Metal; keeping the vertex stage byte-identical to the
+  known-good one avoids it entirely.
 
 Host-only presentation diagnostics (set in the environment of
-`ddraw-host.exe`, all off by default; the drawing ones need
-`CNC_DDRAW_HOST_GPU=1`):
+`ddraw-host.exe`, all off by default; the drawing ones need the render-pipeline
+path, which is the default - `CNC_DDRAW_HOST_BLIT=1` disables them):
 
 | Variable | Effect |
 | --- | --- |
-| `CNC_DDRAW_HOST_GPU=1` | Use the textured render-pipeline path instead of the CPU blit |
+| `CNC_DDRAW_HOST_BLIT=1` | Use the CPU nearest-neighbour upscale plus `copy_texture_to_texture` instead of the render pipeline |
 | `CNC_DDRAW_HOST_CLEAR=red\|green\|blue\|white\|magenta\|0xRRGGBB` | Clear the swapchain and skip drawing |
 | `CNC_DDRAW_HOST_SOLID_DRAW=1` | GPU path: draw a fullscreen red triangle with no bindings |
 | `CNC_DDRAW_HOST_SOLID=1` | Upload an all-red RGBA frame instead of the game frame |
@@ -284,13 +286,12 @@ COM class factories.
 - If the host exits, the 32-bit side logs the failure and retries on the next
   present tick; on native Windows it can still fall back to the in-process
   renderer.
-- The default host present path is a CPU nearest-neighbour upscale followed by
-  `copy_texture_to_texture`, because on wgpu 27 / DX12 / D3DMetal any draw
-  through a pipeline that declares a bind group produces no pixels (see the
-  presenter notes above). This costs roughly one 1440x1080 RGBA rescale per
-  *new* game frame on the CPU, and only when the frame or the window size
-  changes. `CNC_DDRAW_HOST_GPU=1` still selects the render-pipeline path for
-  environments where descriptor bindings work.
-- Frame output is nearest-neighbour scaled; there is no bilinear filtering in
-  the CPU path yet, so non-integer scale factors (e.g. 800x600 to 1440x1080)
-  show slightly hard pixel edges.
+- The default host present path is the GPU render pipeline: the CPU converts the
+  raw surface to RGBA8 (one pass over the 800x600 frame) and uploads it, and the
+  fragment shader turns destination pixels into texel lookups. `CNC_DDRAW_HOST_BLIT=1`
+  switches to a CPU nearest-neighbour upscale plus `copy_texture_to_texture`,
+  which needs no pipeline and exists as a fallback for stacks where the
+  pipeline path fails.
+- Frame output is nearest-neighbour scaled (the shader indexes exact texels), so
+  non-integer scale factors (e.g. 800x600 to 1440x1080) show slightly hard pixel
+  edges.
