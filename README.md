@@ -193,6 +193,17 @@ from "draw/sample path broken".
   `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT`, answers
   `WM_NCHITTEST` with `HTTRANSPARENT`, and is hidden when the game is
   minimised, not foreground, or showing a dialog.
+
+  Because Wine dispatches mouse input to the window under the cursor instead of
+  re-running the `HTTRANSPARENT` hit test, the window would otherwise swallow
+  every click while the game stayed visible and focused behind it. The host
+  therefore calls `EnableWindow(.., FALSE)` after the swapchain is created: a
+  disabled window receives no mouse input and is skipped by `WindowFromPoint` on
+  both Windows and Wine. As a second line of defence, any mouse message the
+  overlay still receives is posted to the game window unchanged (the overlay
+  covers exactly the game's client area, so the coordinates already match).
+  `CNC_DDRAW_HOST_OVERLAY_INPUT=1` keeps the overlay interactive and relies on
+  that forwarding alone.
 - `protocol/src/lib.rs` is the shared frame-ring header. It uses only 32-bit
   fields and atomics so i686 and x86_64 agree on layout.
 

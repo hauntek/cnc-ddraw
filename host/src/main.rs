@@ -98,12 +98,25 @@ fn run() -> Result<(), String> {
     // Declaration order matters: `presenter` is declared after `overlay` and
     // therefore dropped before it, so the wgpu surface dies before the HWND.
     let mut overlay = Overlay::new()?;
+    // Anything the overlay receives that belongs to the game (because Wine
+    // routed the click to the topmost window instead of the game below it) is
+    // forwarded to the game window.
+    crate::overlay::set_input_target(game);
     let mut presenter = Presenter::new(
         overlay.hwnd(),
         overlay.hinstance(),
         &args.backend,
         args.maintas,
     )?;
+    // After the swapchain exists, make sure the overlay can never swallow a
+    // click meant for the game window underneath it. Set
+    // `CNC_DDRAW_HOST_OVERLAY_INPUT=1` to keep the old interactive overlay for
+    // A/B testing input problems.
+    if std::env::var_os("CNC_DDRAW_HOST_OVERLAY_INPUT").is_none() {
+        overlay.make_click_through();
+    } else {
+        logging::log_msg("overlay: left interactive (CNC_DDRAW_HOST_OVERLAY_INPUT)");
+    }
     logging::log_msg("host ready");
 
     let mut last_seq = 0u32;
