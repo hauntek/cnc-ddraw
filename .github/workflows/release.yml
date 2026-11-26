@@ -30,8 +30,7 @@ jobs:
           set -euo pipefail
           ls -la dist
           test -f dist/ddraw.dll
-          test -f dist/ddraw.pdb
-          (cd dist && sha256sum ddraw.dll ddraw.pdb > SHA256SUMS.txt)
+          (cd dist && sha256sum ddraw.dll > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
 
       - name: Create GitHub Release
@@ -42,5 +41,4 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/ddraw.dll
-            dist/ddraw.pdb
             dist/SHA256SUMS.txt
