@@ -150,8 +150,31 @@ windowed mode.
   exports, and COM class factories.
 - `src/renderer.rs` is the legacy 32-bit wgpu presenter. `presenter=host` does
   not instantiate it.
-- `host/src/presenter.rs` is the 64-bit wgpu DX12 presenter. It reuses the same
-  WGSL unpack/LUT shader as the legacy path.
+- `host/src/presenter.rs` is the 64-bit wgpu DX12 presenter. The 32-bit side
+  converts the raw primary surface (indexed/RGB555/RGB565/XRGB) to tightly
+  packed RGBA8 using the palette LUT, the host uploads it as a single
+  `Rgba8Unorm` texture, and `host/src/present.wgsl` samples it with
+  `textureLoad` from `@builtin(position)`. There is deliberately no sampler
+  binding: naga's HLSL backend turns a sampler into a sampler-heap resource
+  array that D3DMetal's FXC rejects with `E5017`. Texture size and viewport
+  origin come from a small uniform buffer, so the shader never calls
+  `textureDimensions()`.
+
+Host-only presentation diagnostics (set in the environment of
+`ddraw-host.exe`, all off by default):
+
+| Variable | Effect |
+| --- | --- |
+| `CNC_DDRAW_HOST_CLEAR=red\|green\|blue\|white\|magenta\|0xRRGGBB` | Clear the swapchain and skip drawing |
+| `CNC_DDRAW_HOST_SOLID_DRAW=1` | Draw a fullscreen red triangle with no bindings |
+| `CNC_DDRAW_HOST_SOLID=1` | Upload an all-red RGBA texture instead of the frame |
+| `CNC_DDRAW_HOST_CONST_FS=1` | Use the frame pipeline but a constant green fragment shader |
+| `CNC_DDRAW_HOST_POSITION_UV=1` | Sample from the interpolated vertex UV instead of `@builtin(position)` |
+| `CNC_DDRAW_HOST_FULL_VIEWPORT=1` | Stretch the frame over the whole target |
+
+On the first present the host also copies the first texture row back and logs
+`gpu row0: ...`, which distinguishes "upload never reached the GPU" from
+"draw/sample path broken".
 - `host/src/overlay.rs` owns the 64-bit click-through overlay window. It is
   `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT`, answers
   `WM_NCHITTEST` with `HTTRANSPARENT`, and is hidden when the game is

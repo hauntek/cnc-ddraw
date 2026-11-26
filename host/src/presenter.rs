@@ -47,21 +47,16 @@ fn debug_clear() -> Option<wgpu::Color> {
 
 struct UploadedFrame {
     raw_texture: wgpu::Texture,
+    params: wgpu::Buffer,
     bindings: wgpu::BindGroup,
 }
 
 impl UploadedFrame {
     fn new(
         device: &wgpu::Device,
-        pipeline: &wgpu::RenderPipeline,
-        target_format: wgpu::TextureFormat,
+        frame_layout: &wgpu::BindGroupLayout,
         size: wgpu::Extent3d,
     ) -> Self {
-        // Deliberately UNORM: D3DMetal's sRGB texture path is one of the
-        // suspects for the black output. This may look slightly bright on an
-        // sRGB swapchain, but it is visible and lets us separate colorspace
-        // from a completely broken sample/upload path.
-        let _ = target_format;
         let raw_format = wgpu::TextureFormat::Rgba8Unorm;
         let raw_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("DirectDraw RGBA primary"),
@@ -70,23 +65,66 @@ impl UploadedFrame {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: raw_format,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
+        });
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DirectDraw frame params"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         let raw_view = raw_texture.create_view(&Default::default());
         let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("DirectDraw frame bindings"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&raw_view),
-            }],
+            layout: frame_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params.as_entire_binding(),
+                },
+            ],
         });
         Self {
             raw_texture,
+            params,
             bindings,
         }
     }
+}
+
+fn frame_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("DirectDraw frame layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(32),
+                },
+                count: None,
+            },
+        ],
+    })
 }
 
 fn instance_descriptor(backend: &str) -> wgpu::InstanceDescriptor {
@@ -109,8 +147,10 @@ pub struct Presenter {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     configured: bool,
+    frame_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
-    position_pipeline: wgpu::RenderPipeline,
+    uv_pipeline: wgpu::RenderPipeline,
+    const_pipeline: wgpu::RenderPipeline,
     solid_pipeline: wgpu::RenderPipeline,
     frame: Option<UploadedFrame>,
     staging: Vec<u8>,
@@ -120,9 +160,11 @@ pub struct Presenter {
     solid: bool,
     solid_draw: bool,
     position_uv: bool,
+    const_fs: bool,
     full_viewport: bool,
     logged_frame: bool,
     logged_present: bool,
+    probed: bool,
     frame_count: u64,
     present_count: u64,
 }
@@ -185,61 +227,63 @@ impl Presenter {
         // Never let Wine/D3DMetal composite the desktop through the overlay.
         surface_cfg.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
 
+        // One explicit layout shared by every pipeline. Pipeline-derived
+        // ("exclusive") layouts are not interchangeable in wgpu 27, which is
+        // why the previous diagnostic pipeline could never bind the frame
+        // bind group at all.
+        let frame_layout = frame_bind_group_layout(&device);
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("DirectDraw pipeline layout"),
+            bind_group_layouts: &[&frame_layout],
+            push_constant_ranges: &[],
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("DirectDraw RGBA present"),
             source: wgpu::ShaderSource::Wgsl(include_str!("present.wgsl").into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("DirectDraw presentation"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(surface_cfg.format.into())],
-            }),
-            multiview: None,
-            cache: None,
-        });
-
-        let position_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("DirectDraw position-uv diagnostic"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_position"),
-                compilation_options: Default::default(),
-                targets: &[Some(surface_cfg.format.into())],
-            }),
-            multiview: None,
-            cache: None,
-        });
+        let make_pipeline = |label: &str, entry: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(surface_cfg.format.into())],
+                }),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let pipeline = make_pipeline("DirectDraw presentation", "fs");
+        let uv_pipeline = make_pipeline("DirectDraw uv diagnostic", "fs_uv");
+        let const_pipeline = make_pipeline("DirectDraw const diagnostic", "fs_const");
 
         let solid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("DirectDraw solid diagnostic"),
             source: wgpu::ShaderSource::Wgsl(include_str!("solid.wgsl").into()),
         });
+        // Empty layout: this path deliberately draws without any bind group, so
+        // it must not declare bind group 0 (wgpu rejects a draw that leaves a
+        // declared group unset).
+        let solid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("DirectDraw solid layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
         let solid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("DirectDraw solid diagnostic"),
-            layout: None,
+            layout: Some(&solid_layout),
             vertex: wgpu::VertexState {
                 module: &solid_shader,
                 entry_point: Some("vs"),
@@ -264,9 +308,10 @@ impl Presenter {
         let solid = std::env::var_os("CNC_DDRAW_HOST_SOLID").is_some();
         let solid_draw = std::env::var_os("CNC_DDRAW_HOST_SOLID_DRAW").is_some();
         let position_uv = std::env::var_os("CNC_DDRAW_HOST_POSITION_UV").is_some();
+        let const_fs = std::env::var_os("CNC_DDRAW_HOST_CONST_FS").is_some();
         let full_viewport = std::env::var_os("CNC_DDRAW_HOST_FULL_VIEWPORT").is_some();
         logging::log_msg(&format!(
-            "presenter init: format={:?} clear_only={clear_only} solid={solid} solid_draw={solid_draw} position_uv={position_uv} full_viewport={full_viewport}",
+            "presenter init: format={:?} clear_only={clear_only} solid={solid} solid_draw={solid_draw} position_uv={position_uv} const_fs={const_fs} full_viewport={full_viewport}",
             surface_cfg.format
         ));
 
@@ -276,8 +321,10 @@ impl Presenter {
             queue,
             config: surface_cfg,
             configured: false,
+            frame_layout,
             pipeline,
-            position_pipeline,
+            uv_pipeline,
+            const_pipeline,
             solid_pipeline,
             frame: None,
             staging: Vec::new(),
@@ -287,9 +334,11 @@ impl Presenter {
             solid,
             solid_draw,
             position_uv,
+            const_fs,
             full_viewport,
             logged_frame: false,
             logged_present: false,
+            probed: false,
             frame_count: 0,
             present_count: 0,
         })
@@ -357,14 +406,10 @@ impl Presenter {
         {
             self.frame = None;
         }
-        let frame = self.frame.get_or_insert_with(|| {
-            UploadedFrame::new(
-                &self.device,
-                &self.pipeline,
-                self.config.format,
-                size,
-            )
-        });
+        if self.frame.is_none() {
+            self.frame = Some(UploadedFrame::new(&self.device, &self.frame_layout, size));
+        }
+        let frame = self.frame.as_ref().expect("frame was just created");
 
         // Match the original in-process renderer: queue.write_texture accepts
         // a tightly packed row stride (the original passes the DirectDraw pitch
@@ -502,6 +547,28 @@ impl Presenter {
                 frame.map(|f| f.raw_texture.size())
             ));
         }
+        let (vx, vy, vw, vh) = if self.full_viewport {
+            (0, 0, target_w.max(1), target_h.max(1))
+        } else if let Some(frame) = frame {
+            let frame_size = frame.raw_texture.size();
+            compute_viewport(
+                frame_size.width,
+                frame_size.height,
+                target_w,
+                target_h,
+                self.maintas,
+            )
+        } else {
+            (0, 0, target_w.max(1), target_h.max(1))
+        };
+        if let Some(frame) = frame {
+            write_frame_params(&self.queue, frame, vx, vy, vw, vh);
+            if !self.probed {
+                self.probed = true;
+                self.readback_probe(frame);
+            }
+        }
+
         let view = output.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
@@ -518,32 +585,21 @@ impl Presenter {
                 })],
                 ..Default::default()
             });
-            let (vx, vy, vw, vh) = if self.full_viewport {
-                (0, 0, target_w.max(1), target_h.max(1))
-            } else if let Some(frame) = frame {
-                let frame_size = frame.raw_texture.size();
-                compute_viewport(
-                    frame_size.width,
-                    frame_size.height,
-                    target_w,
-                    target_h,
-                    self.maintas,
-                )
-            } else {
-                (0, 0, target_w.max(1), target_h.max(1))
-            };
             pass.set_viewport(vx as f32, vy as f32, vw as f32, vh as f32, 0.0, 1.0);
-            if self.solid_draw {
+            if self.clear_only {
+                // The swapchain is left as the cleared colour on purpose.
+            } else if self.solid_draw {
                 pass.set_pipeline(&self.solid_pipeline);
                 pass.draw(0..3, 0..1);
-            } else if self.position_uv {
-                if let Some(frame) = frame {
-                    pass.set_pipeline(&self.position_pipeline);
-                    pass.set_bind_group(0, &frame.bindings, &[]);
-                    pass.draw(0..3, 0..1);
-                }
             } else if let Some(frame) = frame {
-                pass.set_pipeline(&self.pipeline);
+                let selected = if self.const_fs {
+                    &self.const_pipeline
+                } else if self.position_uv {
+                    &self.uv_pipeline
+                } else {
+                    &self.pipeline
+                };
+                pass.set_pipeline(selected);
                 pass.set_bind_group(0, &frame.bindings, &[]);
                 pass.draw(0..3, 0..1);
             }
@@ -559,6 +615,84 @@ impl Presenter {
         }
         Ok(())
     }
+
+    /// One-shot diagnostic: copy the first texture row back to the CPU and log
+    /// it. If `gpu row0` matches the staged bytes, the upload is fine and the
+    /// problem is in the draw/sample path; if it is all zeroes, the texture
+    /// never received the frame.
+    fn readback_probe(&self, frame: &UploadedFrame) {
+        let width = frame.raw_texture.width().max(1);
+        let row_bytes = width.saturating_mul(4).max(4);
+        let padded = row_bytes.div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DirectDraw readback"),
+            size: u64::from(padded),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            frame.raw_texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        // Bounded wait: a diagnostic must never freeze the presenter.
+        let timeout = std::time::Duration::from_millis(1000);
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(timeout),
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(())) => {
+                let data = slice.get_mapped_range();
+                logging::log_msg(&format!(
+                    "gpu row0: {:02x?}",
+                    &data[..data.len().min(16)]
+                ));
+                drop(data);
+            }
+            Ok(Err(err)) => logging::log_msg(&format!("gpu readback failed: {err}")),
+            Err(err) => logging::log_msg(&format!("gpu readback unavailable: {err}")),
+        }
+        buffer.unmap();
+    }
+}
+
+fn write_frame_params(
+    queue: &wgpu::Queue,
+    frame: &UploadedFrame,
+    origin_x: u32,
+    origin_y: u32,
+    target_w: u32,
+    target_h: u32,
+) {
+    let size = frame.raw_texture.size();
+    let mut bytes = [0u8; 32];
+    bytes[0..4].copy_from_slice(&(size.width as f32).to_le_bytes());
+    bytes[4..8].copy_from_slice(&(size.height as f32).to_le_bytes());
+    bytes[8..12].copy_from_slice(&(origin_x as f32).to_le_bytes());
+    bytes[12..16].copy_from_slice(&(origin_y as f32).to_le_bytes());
+    bytes[16..20].copy_from_slice(&(target_w.max(1) as f32).to_le_bytes());
+    bytes[20..24].copy_from_slice(&(target_h.max(1) as f32).to_le_bytes());
+    queue.write_buffer(&frame.params, 0, &bytes);
 }
 
 fn compute_viewport(
