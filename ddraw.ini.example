@@ -30,16 +30,6 @@ height = 0
 ; posy = 0
 
 ; --- scaling -----------------------------------------------------------------
-; yes = the game window itself is enlarged to width/height and every coordinate
-;       the game sees is virtualized back to its own resolution. Fast, but real
-;       Win32 dialogs and their controls keep real pixel sizes, so a scaled
-;       window cannot keep them aligned with the game's own art.
-; no  = the game window keeps the game's own resolution and the presenter's
-;       overlay window shows it scaled up to width/height (centred on it) and
-;       forwards the mouse. Every coordinate stays native, so dialogs, controls
-;       and clicks line up exactly as they do at the game's own resolution.
-; Unset = on for presenter = inproc, off for presenter = host.
-; windowscale = no
 ; Keep the 4:3 aspect ratio and add pillarbox bars: 800x600 -> 1440x1080
 ; centred in a 1920x1080 window. Set to no to stretch instead.
 maintas = yes

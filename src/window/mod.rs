@@ -33,7 +33,6 @@ static BOUND_THREAD: AtomicU32 = AtomicU32::new(0);
 static LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(0);
 static LOGICAL_HEIGHT: AtomicU32 = AtomicU32::new(0);
 static LOGICAL_BPP: AtomicU32 = AtomicU32::new(0);
-static BOUND_CLIENT: AtomicU32 = AtomicU32::new(0);
 static MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LOGICAL_SCALING_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -58,28 +57,14 @@ pub fn compute_viewport(
     ((target_w - w) / 2, (target_h - h) / 2, w, h)
 }
 
-/// Size the game believes its client area has.
-///
-/// Until the game declares a display mode there is no surface size to virtualize to, but the game
-/// still has a belief: the client rect it saw when it created the window, before this DLL resized
-/// it. Using that as the provisional logical size keeps the whole hook layer consistent from the
-/// first message onwards - without it the game observes the real client size once, caches it and
-/// rescales every mouse position by the ratio between the window and the surface.
 pub(crate) fn logical_mode() -> Option<(HWND, u32, u32, u32)> {
-    if !LOGICAL_SCALING_ACTIVE.load(Ordering::Relaxed) {
+    if !LOGICAL_SCALING_ACTIVE.load(Ordering::Relaxed) || !MODE_ACTIVE.load(Ordering::Relaxed) {
         return None;
     }
     let hwnd = BOUND_HWND.load()?;
+    let w = LOGICAL_WIDTH.load(Ordering::Relaxed);
+    let h = LOGICAL_HEIGHT.load(Ordering::Relaxed);
     let bpp = LOGICAL_BPP.load(Ordering::Relaxed);
-    let (w, h) = if MODE_ACTIVE.load(Ordering::Relaxed) {
-        (
-            LOGICAL_WIDTH.load(Ordering::Relaxed),
-            LOGICAL_HEIGHT.load(Ordering::Relaxed),
-        )
-    } else {
-        let packed = BOUND_CLIENT.load(Ordering::Relaxed);
-        ((packed >> 16) & 0xffff, packed & 0xffff)
-    };
     if w == 0 || h == 0 {
         return None;
     }
@@ -131,21 +116,6 @@ pub fn bind_window(hwnd: HWND, scaling_active: bool) -> usize {
     BOUND_THREAD.store(tid, Ordering::Relaxed);
     LOGICAL_SCALING_ACTIVE.store(scaling_active, Ordering::Relaxed);
     MODE_ACTIVE.store(false, Ordering::Relaxed);
-    // Record what the game still believes its client area is: nothing has resized the window yet,
-    // so this is exactly the size it used when it created the window.
-    let client = client_rect(hwnd).unwrap_or_default();
-    let (cw, ch) = (
-        (client.right - client.left).max(0) as u32,
-        (client.bottom - client.top).max(0) as u32,
-    );
-    BOUND_CLIENT.store(((cw & 0xffff) << 16) | (ch & 0xffff), Ordering::Relaxed);
-    crate::compat::log_msg(&format!(
-        "bind: hwnd=0x{:x} client={}x{} windowscale={}",
-        hwnd.0 as usize,
-        cw,
-        ch,
-        scaling_active
-    ));
     hooks::install_iat_hooks();
     hooks::install_subclass(hwnd);
     hooks::install_getmsg_hook(tid);

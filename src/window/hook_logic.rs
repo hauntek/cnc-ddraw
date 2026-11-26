@@ -23,8 +23,8 @@ use crate::win32::hwnd::{
 };
 
 use super::input::{
-    client_origin_in_bound, client_to_logical, hit_test_real_child, is_mouse_message,
-    is_related_dialog_window, logical_to_client,
+    client_to_logical, hit_test_real_child, is_mouse_message, is_related_dialog_window,
+    logical_to_client,
 };
 use super::overlay::ensure_present_on_top_if_active;
 use super::{
@@ -294,32 +294,9 @@ pub(super) fn virtual_device_caps(index: i32) -> Option<i32> {
 }
 
 pub(super) fn rewrite_getmsg(msg: &mut MSG) {
-    let Some(bound) = bound_hwnd() else {
+    let Some((bound, _, _, _)) = logical_mode() else {
         return;
     };
-    if logical_mode().is_none() {
-        // Unscaled: the game window keeps the game's own resolution, so the coordinates the game
-        // receives are already native. Only make sure a click the presenter overlay forwarded to
-        // the game window reaches the control that is actually under the cursor - the window
-        // manager could not do that for it, because the overlay owned the input.
-        if msg.hwnd != bound || !is_mouse_message(msg.message) || msg.message == WM_MOUSEWHEEL {
-            return;
-        }
-        // The message already carries coordinates in the game window's client space - either the
-        // window manager put them there, or the overlay forwarded them after scaling its own
-        // pixels back to the frame. Only the target window needs fixing.
-        let raw = msg.lParam.0 as u32;
-        let px = (raw & 0xffff) as i16 as i32;
-        let py = ((raw >> 16) & 0xffff) as i16 as i32;
-        let Some(target) = hit_test_real_child(bound, px, py) else {
-            return;
-        };
-        let (tx, ty) = client_origin_in_bound(bound, target);
-        let (cx, cy) = (px - tx, py - ty);
-        msg.hwnd = target;
-        msg.lParam = LPARAM(((cy as u16 as u32) << 16 | (cx as u16 as u32)) as isize);
-        return;
-    }
     if msg.hwnd != bound {
         // A real dialog or control owns this message. Its native `lParam` is already the position
         // the game expects, because dialogs are reported in the same game-window-anchored space
@@ -381,12 +358,7 @@ pub(super) fn handle_subclass_message(
         crate::draw::flush_pending_present(true);
         return SubclassAction::Return(LRESULT(0));
     }
-    // Alt+Enter resizes the game window, which overlay scaling deliberately never does.
-    let toggle_vk = if config::get().windowscale_enabled() {
-        config::get().toggle_fullscreen_vk
-    } else {
-        0
-    };
+    let toggle_vk = config::get().toggle_fullscreen_vk;
     if toggle_vk != 0 {
         let alt_down = (lparam.0 as u32) & (1 << 29) != 0;
         let was_down = (lparam.0 as u32) & (1 << 30) != 0;

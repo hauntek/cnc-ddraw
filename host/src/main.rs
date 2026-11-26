@@ -252,10 +252,6 @@ struct Args {
     backend: String,
     maintas: bool,
     vsync: bool,
-    /// Size of the picture the player should see. Non-zero means the game window keeps the game's
-    /// own resolution and the overlay window shows it scaled up to this size.
-    width: u32,
-    height: u32,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -266,8 +262,6 @@ fn parse_args() -> Result<Args, String> {
     let mut backend = "auto".to_string();
     let mut maintas = true;
     let mut vsync = true;
-    let mut width = 0u32;
-    let mut height = 0u32;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -297,20 +291,6 @@ fn parse_args() -> Result<Args, String> {
                 let value = args.next().ok_or("--vsync requires a value")?;
                 vsync = !matches!(value.as_str(), "0" | "false" | "no" | "off");
             }
-            "--width" => {
-                width = args
-                    .next()
-                    .ok_or("--width requires a value")?
-                    .parse::<u32>()
-                    .map_err(|_| "invalid --width value".to_string())?;
-            }
-            "--height" => {
-                height = args
-                    .next()
-                    .ok_or("--height requires a value")?
-                    .parse::<u32>()
-                    .map_err(|_| "invalid --height value".to_string())?;
-            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -322,8 +302,6 @@ fn parse_args() -> Result<Args, String> {
         backend,
         maintas,
         vsync,
-        width,
-        height,
     })
 }
 
@@ -451,31 +429,14 @@ fn run() -> Result<(), String> {
 
         if have_frame && overlay::game_visible(game) {
             if let Some(rect) = overlay::client_screen_rect(game) {
-                // `--width/--height` request a bigger picture than the game window: the overlay is
-                // centred on the game window and the frame is scaled up into it. Without them the
-                // overlay simply covers the game's client area one-to-one.
-                let target = if args.width > 0 && args.height > 0 {
-                    let (cx, cy) = (
-                        rect.0 + rect.2 as i32 / 2,
-                        rect.1 + rect.3 as i32 / 2,
-                    );
-                    (
-                        cx - args.width as i32 / 2,
-                        cy - args.height as i32 / 2,
-                        args.width as i32,
-                        args.height as i32,
-                    )
-                } else {
-                    rect
-                };
-                let (x, y, width, height) = target;
+                let (x, y, width, height) = rect;
                 overlay.show_at(x, y, width, height);
                 // A new frame, a moved or resized overlay, or a swapchain that
                 // was just reconfigured all require a fresh present; anything
                 // else would redraw the exact same picture.
                 let changed = present_always
                     || presented_seq != Some(last_seq)
-                    || presented_rect != Some(target);
+                    || presented_rect != Some(rect);
                 if changed {
                     let started = std::time::Instant::now();
                     let result = presenter.present(width as u32, height as u32);
@@ -484,7 +445,7 @@ fn run() -> Result<(), String> {
                     match result {
                         Ok(()) => {
                             presented_seq = Some(last_seq);
-                            presented_rect = Some(target);
+                            presented_rect = Some(rect);
                             // SAFETY: The event handle is valid for the process lifetime.
                             unsafe {
                                 let _ = SetEvent(presented_event);

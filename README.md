@@ -219,19 +219,6 @@ On the first GPU-path present the host also copies the first texture row back
 and logs `gpu row0: ...`, which distinguishes "upload never reached the GPU"
 from "draw/sample path broken".
 
-### Overlay scaling vs. a scaled window
-
-`windowscale = no` (the default for `presenter = host`) keeps the game window at the
-game's own resolution and lets the presenter's overlay window show the frame scaled
-up to `width`/`height`, centred on it, forwarding the mouse back in frame
-coordinates. Every coordinate the game reads is then native, which is the only way
-real Win32 dialogs, their controls and the game's own art stay in the same space.
-
-`windowscale = yes` instead enlarges the game window itself and virtualizes every
-coordinate the game can observe; see below for what that involves. A scaled window
-cannot keep real dialog controls aligned with the game's own drawing, because the
-controls are laid out by the window manager in real pixels.
-
 ### Coordinate space when the window is scaled
 
 The primary surface stays at the game's own resolution (for example 800x600)
