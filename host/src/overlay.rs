@@ -149,18 +149,18 @@ impl Overlay {
         self.hinstance
     }
 
-    /// Take the overlay out of mouse hit-testing entirely.
+    /// Disable the overlay window, which takes it out of input routing.
     ///
-    /// `WS_EX_TRANSPARENT` plus `WM_NCHITTEST -> HTTRANSPARENT` is enough on
-    /// native Windows, but Wine dispatches mouse input straight to the window
-    /// under the cursor without running the hit-test retry loop, so a topmost
-    /// popup swallows every click while the game keeps the foreground and stays
-    /// visible behind it. A *disabled* window is documented to never receive
-    /// mouse input and is skipped by `WindowFromPoint`, which both Windows and
-    /// Wine honour.
+    /// This is **not** the default: measurements under Wine show that a disabled
+    /// window is still returned by `WindowFromPoint` (so it becomes the input
+    /// target) but can no longer receive mouse messages, which loses every
+    /// click. `WS_EX_TRANSPARENT` plus `WM_NCHITTEST -> HTTRANSPARENT` alone
+    /// already make the hit test skip the overlay while it stays enabled, which
+    /// is what lets clicks reach the game window underneath.
     ///
-    /// Called only after the swapchain has been created for `hwnd`, so DXGI
-    /// never has to deal with a disabled window during surface creation.
+    /// Kept for the case where a stack routes input to the overlay even though
+    /// it is transparent; called after the swapchain exists so DXGI never has to
+    /// deal with a disabled window during surface creation.
     pub fn make_click_through(&mut self) {
         // SAFETY: `self.hwnd` is a live window owned by this process.
         let was_enabled = unsafe { EnableWindow(self.hwnd, false) }.as_bool();

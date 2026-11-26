@@ -213,7 +213,7 @@ path, which is the default - `CNC_DDRAW_HOST_BLIT=1` disables them):
 | `CNC_DDRAW_HOST_PRESENT_ALWAYS=1` | Present every loop iteration instead of only when the picture changed |
 | `CNC_DDRAW_HOST_TIMING=1` | Log `timing: ...` every 2 s with loop/upload/present rates and average CPU cost |
 | `CNC_DDRAW_HOST_INPUT_BRIDGE=1` | Poll the real mouse and post synthetic button messages to the game window |
-| `CNC_DDRAW_HOST_OVERLAY_INPUT=1` | Keep the overlay window enabled and rely on input forwarding only |
+| `CNC_DDRAW_HOST_OVERLAY_DISABLE=1` | Disable the overlay window (loses clicks under Wine; see below) |
 
 On the first GPU-path present the host also copies the first texture row back
 and logs `gpu row0: ...`, which distinguishes "upload never reached the GPU"
@@ -232,16 +232,18 @@ actually go?" without guessing:
   `WM_NCHITTEST` with `HTTRANSPARENT`, and is hidden when the game is
   minimised, not foreground, or showing a dialog.
 
-  Because Wine dispatches mouse input to the window under the cursor instead of
-  re-running the `HTTRANSPARENT` hit test, the window would otherwise swallow
-  every click while the game stayed visible and focused behind it. The host
-  therefore calls `EnableWindow(.., FALSE)` after the swapchain is created: a
-  disabled window receives no mouse input and is skipped by `WindowFromPoint` on
-  both Windows and Wine. As a second line of defence, any mouse message the
-  overlay still receives is posted to the game window unchanged (the overlay
-  covers exactly the game's client area, so the coordinates already match).
-  `CNC_DDRAW_HOST_OVERLAY_INPUT=1` keeps the overlay interactive and relies on
-  that forwarding alone.
+  Measurements under Wine show that `WS_EX_TRANSPARENT` plus `HTTRANSPARENT`
+  already keep the overlay out of hit-testing *while it stays enabled*: the
+  `hit probe` reports the game window (or one of its children) under the cursor,
+  so real clicks reach the game natively. Disabling the window with
+  `EnableWindow(.., FALSE)` does the opposite of what it looks like - the
+  disabled window is still returned by `WindowFromPoint`, becomes the input
+  target and then drops the message because it cannot receive mouse input, which
+  is why clicks vanished while the keyboard and the polled cursor kept working.
+  The window is therefore left enabled, and any mouse message it does receive is
+  still posted to the game window unchanged (the overlay covers exactly the
+  game's client area, so the coordinates already match).
+  `CNC_DDRAW_HOST_OVERLAY_DISABLE=1` restores the old disabled behaviour.
 
   Neither of those is enough when Wine simply keeps routing input to a disabled
   topmost window: the game then never sees the click and its thread's

@@ -311,14 +311,17 @@ fn run() -> Result<(), String> {
         args.maintas,
         args.vsync,
     )?;
-    // After the swapchain exists, make sure the overlay can never swallow a
-    // click meant for the game window underneath it. Set
-    // `CNC_DDRAW_HOST_OVERLAY_INPUT=1` to keep the old interactive overlay for
-    // A/B testing input problems.
-    if std::env::var_os("CNC_DDRAW_HOST_OVERLAY_INPUT").is_none() {
+    // Keep the overlay enabled. `WS_EX_TRANSPARENT` plus `HTTRANSPARENT` already
+    // make the hit test skip it, which the `hit probe` confirms: with the window
+    // enabled the probe reports the game window (or one of its children) under
+    // the cursor, while a *disabled* window is reported as the hit target and
+    // then drops the input because it cannot receive mouse messages. That made
+    // clicks disappear entirely - keyboard and cursor tracking still worked
+    // because the game polls `GetCursorPos` and reads keys from its own queue.
+    if std::env::var_os("CNC_DDRAW_HOST_OVERLAY_DISABLE").is_some() {
         overlay.make_click_through();
     } else {
-        logging::log_msg("overlay: left interactive (CNC_DDRAW_HOST_OVERLAY_INPUT)");
+        logging::log_msg("overlay: interactive, hit-testing skips it");
     }
     logging::log_msg("present target: overlay");
     logging::log_msg("host ready");

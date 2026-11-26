@@ -1,0 +1,66 @@
+; ddraw.ini for the Rust/cnc-ddraw fork (64-bit host presenter on Wine/macOS)
+;
+; Place this file next to ddraw.dll (or next to the game executable).
+; Keys are case-insensitive. Booleans accept yes/no, true/false, on/off, 1/0.
+; Text after ';' or '#' on the same line is treated as a comment.
+;
+; [ddraw]  -> global settings, applied to every game
+; [<exe>]  -> per-game override, section named after the executable stem,
+;             e.g. [ra2] for ra2.exe. Applied after [ddraw], so it wins.
+
+[ddraw]
+; --- presentation path -------------------------------------------------------
+; host = start ddraw-host.exe and present through it (the only path that works
+;        under Wine/macOS with D3DMetal). inproc = legacy 32-bit renderer.
+presenter = host
+; dx12 = D3DMetal, vulkan = MoltenVK, auto = let the host decide.
+renderer = dx12
+
+; --- window ------------------------------------------------------------------
+; no  = borderless fullscreen covering the whole monitor (1920x1080 here)
+; yes = real window, sized by width/height below
+windowed = no
+border = no
+resizable = no
+; Only used when windowed = yes. 0 = follow the game's own resolution.
+width = 0
+height = 0
+; Omit posx/posy (or use -32000) to centre the window automatically.
+; posx = 0
+; posy = 0
+
+; --- scaling -----------------------------------------------------------------
+; Keep the 4:3 aspect ratio and add pillarbox bars: 800x600 -> 1440x1080
+; centred in a 1920x1080 window. Set to no to stretch instead.
+maintas = yes
+
+; --- pacing ------------------------------------------------------------------
+; no = do not wait for the vertical blank; the host asks for Immediate, then
+;      Mailbox, and only falls back to Fifo if the stack offers nothing else.
+vsync = no
+; 0 = no extra frame limiter. Any other value waits (1000 / maxfps) ms after
+; every submit, which is a second, independent cap on the game's frame rate.
+maxfps = 0
+
+; --- input / process ---------------------------------------------------------
+; VK_RETURN toggles fullscreen/windowed at runtime (decimal or 0x hex).
+keytogglefullscreen = 0x0D
+; Affinity to a single CPU, which keeps the old engine's timing stable.
+singlecpu = yes
+; Stop the game from stealing activation. Already enabled by default for
+; ra2/game/gamemd/ra2md/sun/ts.
+noactivateapp = yes
+
+; --- logging -----------------------------------------------------------------
+; Writes cnc-ddraw.log next to ddraw.dll. Override the path with the
+; CNC_DDRAW_LOG environment variable, or set to no to disable.
+log = yes
+
+
+; Example per-game section: a smaller 4:3 window instead of borderless fullscreen
+; [ra2]
+; windowed = yes
+; border = yes
+; resizable = yes
+; width = 1280
+; height = 960
