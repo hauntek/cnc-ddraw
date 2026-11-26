@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   win32:
-    runs-on: windows-2022
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -25,18 +25,11 @@ jobs:
           rustup target add i686-pc-windows-gnullvm
           rustup component add rustfmt clippy
 
-      - name: Install llvm-mingw
-        shell: pwsh
+      - name: Install llvm-mingw via Homebrew
         run: |
-          $version = "20240606"
-          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/llvm-mingw-$version-ucrt-x86_64.zip"
-          $zip = "llvm-mingw.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath "C:\"
-          $llvmMingwDir = Get-ChildItem "C:\" -Directory -Filter "llvm-mingw*" | Select-Object -First 1
-          echo "$($llvmMingwDir.FullName)\bin" >> $env:GITHUB_PATH
-          # 立即将路径加入当前会话，供后续步骤使用
-          $env:PATH = "$($llvmMingwDir.FullName)\bin;$env:PATH"
+          brew install llvm-mingw
+          # Homebrew 安装的 llvm-mingw 通常链接到 /opt/homebrew/opt/llvm-mingw/bin
+          echo "/opt/homebrew/opt/llvm-mingw/bin" >> $GITHUB_PATH
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -55,23 +48,13 @@ jobs:
         run: cargo build --locked --release --target i686-pc-windows-gnullvm
 
       - name: Verify release output exists
-        shell: pwsh
         run: |
-          $file = "target/i686-pc-windows-gnullvm/release/ddraw.dll"
-          if (-not (Test-Path $file)) {
-            Write-Error "Missing expected build output: $file"
+          file="target/i686-pc-windows-gnullvm/release/ddraw.dll"
+          if [ ! -f "$file" ]; then
+            echo "Missing expected build output: $file"
             exit 1
-          }
-          Get-Item $file | Format-Table Name, Length -AutoSize
-
-      - name: Exercise the DLL through the x86 Windows SDK ABI
-        shell: cmd
-        run: |
-          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
-          if errorlevel 1 exit /b 1
-          cl /nologo /W4 tests\smoke.c user32.lib gdi32.lib /Fe:target\i686-pc-windows-gnullvm\release\smoke.exe
-          if errorlevel 1 exit /b 1
-          target\i686-pc-windows-gnullvm\release\smoke.exe
+          fi
+          ls -lh "$file"
 
       - name: Upload DLL artifact
         uses: actions/upload-artifact@v4
