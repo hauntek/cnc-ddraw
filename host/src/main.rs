@@ -14,15 +14,102 @@ mod presenter;
 use std::ffi::c_void;
 use std::sync::atomic::Ordering;
 
-use windows::Win32::Foundation::{CloseHandle, HWND, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HWND, POINT, RECT, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_SYNCHRONIZE, SetEvent, WaitForSingleObject,
 };
-use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, IsWindowEnabled, VK_LBUTTON};
+use windows::Win32::UI::WindowsAndMessaging::{
+    ClientToScreen, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
+    GetWindowRect, GetWindowThreadProcessId, IsWindow, IsWindowVisible, WindowFromPoint,
+    GUITHREADINFO,
+};
 
 use ddraw_protocol as protocol;
 use overlay::Overlay;
 use presenter::Presenter;
+
+/// Diagnostic: records where mouse input actually goes. Polled every loop
+/// iteration (two cheap Win32 calls) and only logs when something changes.
+#[derive(Default)]
+struct InputProbe {
+    last_hit: Option<isize>,
+    click_down: bool,
+}
+
+impl InputProbe {
+    fn poll(&mut self, game: HWND, overlay: HWND) {
+        // SAFETY: every call below takes scalars/handles and writes into stack
+        // values owned by this function.
+        unsafe {
+            let mut cursor = POINT::default();
+            if GetCursorPos(&mut cursor).is_err() {
+                return;
+            }
+            let hit = WindowFromPoint(cursor);
+            let hit_id = hit.0 as isize;
+            if self.last_hit != Some(hit_id) {
+                self.last_hit = Some(hit_id);
+                logging::log_msg(&format!(
+                    "hit probe: cursor=({},{}) hit=0x{:x} game=0x{:x} overlay=0x{:x}",
+                    cursor.x, cursor.y, hit.0 as usize, game.0 as usize, overlay.0 as usize
+                ));
+            }
+
+            let down = GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0;
+            if !down {
+                self.click_down = false;
+                return;
+            }
+            if self.click_down {
+                return;
+            }
+            self.click_down = true;
+
+            let foreground = GetForegroundWindow();
+            let mut client = RECT::default();
+            let _ = GetClientRect(game, &mut client);
+            let mut origin = POINT { x: 0, y: 0 };
+            let _ = ClientToScreen(game, &mut origin);
+            let mut overlay_rect = RECT::default();
+            let _ = GetWindowRect(overlay, &mut overlay_rect);
+
+            // The game thread's own idea of activation, focus and capture.
+            let thread = GetWindowThreadProcessId(game, None);
+            let mut gui = GUITHREADINFO {
+                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                ..Default::default()
+            };
+            let gui_ok = GetGUIThreadInfo(thread, &mut gui).is_ok();
+
+            logging::log_msg(&format!(
+                "click probe: cursor=({},{}) hit=0x{:x} game=0x{:x} overlay=0x{:x} fg=0x{:x} \
+                 enabled={} visible={} client=({},{} {}x{}) overlay_rect=({},{} {}x{}) \
+                 active=0x{:x} focus=0x{:x} capture=0x{:x} gui_ok={}",
+                cursor.x,
+                cursor.y,
+                hit.0 as usize,
+                game.0 as usize,
+                overlay.0 as usize,
+                foreground.0 as usize,
+                IsWindowEnabled(game).as_bool(),
+                IsWindowVisible(game).as_bool(),
+                origin.x,
+                origin.y,
+                client.right - client.left,
+                client.bottom - client.top,
+                overlay_rect.left,
+                overlay_rect.top,
+                overlay_rect.right - overlay_rect.left,
+                overlay_rect.bottom - overlay_rect.top,
+                gui.hwndActive.0 as usize,
+                gui.hwndFocus.0 as usize,
+                gui.hwndCapture.0 as usize,
+                gui_ok,
+            ));
+        }
+    }
+}
 
 struct Args {
     base: String,
@@ -102,12 +189,32 @@ fn run() -> Result<(), String> {
     // routed the click to the topmost window instead of the game below it) is
     // forwarded to the game window.
     crate::overlay::set_input_target(game);
-    let mut presenter = Presenter::new(
-        overlay.hwnd(),
-        overlay.hinstance(),
-        &args.backend,
-        args.maintas,
-    )?;
+
+    // Present into the game's own window instead of the overlay. This leaves no
+    // window above the game at all, so the game's thread receives real mouse
+    // input (and its `GetKeyState` sees the buttons); the overlay keeps D3DMetal
+    // in one process but Wine does not route clicks through it.
+    let mut present_into_game = std::env::var_os("CNC_DDRAW_HOST_GAMEWINDOW").is_some();
+    let target = if present_into_game { game } else { overlay.hwnd() };
+    let mut presenter = match Presenter::new(target, overlay.hinstance(), &args.backend, args.maintas)
+    {
+        Ok(presenter) => presenter,
+        Err(err) if present_into_game => {
+            // Cross-process swapchains are supported by DXGI, but keep the
+            // picture alive if this Wine/D3DMetal build refuses one.
+            logging::log_msg(&format!(
+                "game-window surface unavailable ({err}); presenting into the overlay instead"
+            ));
+            present_into_game = false;
+            Presenter::new(
+                overlay.hwnd(),
+                overlay.hinstance(),
+                &args.backend,
+                args.maintas,
+            )?
+        }
+        Err(err) => return Err(err),
+    };
     // After the swapchain exists, make sure the overlay can never swallow a
     // click meant for the game window underneath it. Set
     // `CNC_DDRAW_HOST_OVERLAY_INPUT=1` to keep the old interactive overlay for
@@ -117,13 +224,23 @@ fn run() -> Result<(), String> {
     } else {
         logging::log_msg("overlay: left interactive (CNC_DDRAW_HOST_OVERLAY_INPUT)");
     }
+    logging::log_msg(&format!(
+        "present target: {}",
+        if present_into_game {
+            "game window"
+        } else {
+            "overlay"
+        }
+    ));
     logging::log_msg("host ready");
 
     let mut last_seq = 0u32;
     let mut have_frame = false;
+    let mut probe = InputProbe::default();
 
     loop {
         Overlay::pump_messages();
+        probe.poll(game, overlay.hwnd());
 
         // SAFETY: Both handles are valid and owned until the end of this
         // function; zero timeout makes these non-blocking probes.
@@ -154,7 +271,9 @@ fn run() -> Result<(), String> {
 
         if have_frame && overlay::game_visible(game) {
             if let Some((x, y, width, height)) = overlay::client_screen_rect(game) {
-                overlay.show_at(x, y, width, height);
+                if !present_into_game {
+                    overlay.show_at(x, y, width, height);
+                }
                 match presenter.present(width as u32, height as u32) {
                     Ok(()) => {
                         // SAFETY: The event handle is valid for the process lifetime.

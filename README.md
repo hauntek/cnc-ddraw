@@ -185,10 +185,21 @@ Host-only presentation diagnostics (set in the environment of
 | `CNC_DDRAW_HOST_CONST_NOBIND=1` | GPU path: same vertex shader and constant green fragment, but an **empty** pipeline layout and no bind group |
 | `CNC_DDRAW_HOST_POSITION_UV=1` | GPU path: sample from the interpolated vertex UV |
 | `CNC_DDRAW_HOST_FULL_VIEWPORT=1` | Stretch the frame over the whole target |
+| `CNC_DDRAW_HOST_GAMEWINDOW=1` | Create the swapchain on the **game's own HWND** and never show the overlay |
+| `CNC_DDRAW_HOST_OVERLAY_INPUT=1` | Keep the overlay window enabled and rely on input forwarding only |
 
 On the first GPU-path present the host also copies the first texture row back
 and logs `gpu row0: ...`, which distinguishes "upload never reached the GPU"
 from "draw/sample path broken".
+
+Every host run also logs two input probes, which answer "where does the click
+actually go?" without guessing:
+
+- `hit probe: cursor=(x,y) hit=0x... game=0x... overlay=0x...` whenever
+  `WindowFromPoint` starts returning a different window.
+- `click probe: ...` on the left-button-down edge, including the game window's
+  own `hwndActive`/`hwndFocus`/`hwndCapture` from `GetGUIThreadInfo`, so a game
+  thread that does not consider itself active is visible immediately.
 - `host/src/overlay.rs` owns the 64-bit click-through overlay window. It is
   `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT`, answers
   `WM_NCHITTEST` with `HTTRANSPARENT`, and is hidden when the game is
@@ -204,6 +215,13 @@ from "draw/sample path broken".
   covers exactly the game's client area, so the coordinates already match).
   `CNC_DDRAW_HOST_OVERLAY_INPUT=1` keeps the overlay interactive and relies on
   that forwarding alone.
+
+  Neither of those is enough when Wine simply keeps routing input to a disabled
+  topmost window: the game then never sees the click and its thread's
+  `GetKeyState` never updates. `CNC_DDRAW_HOST_GAMEWINDOW=1` removes the problem
+  by construction - the host creates its swapchain on the game's HWND itself
+  (DXGI allows a cross-process window), never shows the overlay, and the game
+  receives input exactly as it would without us.
 - `protocol/src/lib.rs` is the shared frame-ring header. It uses only 32-bit
   fields and atomics so i686 and x86_64 agree on layout.
 
