@@ -15,8 +15,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CallWindowProcA, CallWindowProcW, CreateDialogIndirectParamA,
     CreateDialogParamA, DialogBoxIndirectParamA, DialogBoxParamA, GetClientRect, GetClipCursor,
     GetMessagePos, GetWindowLongA, GetWindowLongW, GetWindowRect, SendMessageA, SendMessageW,
-    SetCursor, SetWindowLongA, SetWindowLongW, SetWindowsHookExW, ShowCursor, UnhookWindowsHookEx,
-    CB_GETDROPPEDCONTROLRECT, DLGPROC, DLGTEMPLATE, GWLP_WNDPROC, HCURSOR, HHOOK, MSG, RT_DIALOG,
+    SetWindowLongA, SetWindowLongW, SetWindowsHookExW, UnhookWindowsHookEx,
+    CB_GETDROPPEDCONTROLRECT, DLGPROC, DLGTEMPLATE, GWLP_WNDPROC, HHOOK, MSG, RT_DIALOG,
     WH_GETMESSAGE, WM_WINDOWPOSCHANGED, WINDOWPOS, WNDPROC,
 };
 
@@ -180,21 +180,6 @@ unsafe extern "system" fn hook_MoveWindow(
 
 unsafe extern "system" fn hook_GetDeviceCaps(hdc: HDC, index: i32) -> i32 {
     hook_logic::virtual_device_caps(index).unwrap_or_else(|| device_caps(hdc, index))
-}
-
-unsafe extern "system" fn hook_SetCursor(cursor: HCURSOR) -> HCURSOR {
-    // NULL hides the system pointer: remember that so the game's intent survives other windows
-    // restoring the default arrow on `WM_SETCURSOR`.
-    hook_logic::note_set_cursor(cursor.is_invalid());
-    // SAFETY: Forwarding the caller's cursor handle unchanged to Win32 SetCursor.
-    unsafe { SetCursor(Some(cursor)) }
-}
-
-unsafe extern "system" fn hook_ShowCursor(show: BOOL) -> i32 {
-    // SAFETY: ShowCursor takes a plain BOOL and returns the new display count.
-    let count = unsafe { ShowCursor(show.as_bool()) };
-    hook_logic::note_show_cursor(count);
-    count
 }
 
 unsafe extern "system" fn hook_SendMessageA(
@@ -660,16 +645,6 @@ pub(crate) fn install_iat_hooks() {
             "user32.dll",
             "DialogBoxIndirectParamA",
             hook_DialogBoxIndirectParamA as *const () as usize,
-        ),
-        (
-            "user32.dll",
-            "SetCursor",
-            hook_SetCursor as *const () as usize,
-        ),
-        (
-            "user32.dll",
-            "ShowCursor",
-            hook_ShowCursor as *const () as usize,
         ),
         (
             "user32.dll",
