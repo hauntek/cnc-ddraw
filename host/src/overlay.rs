@@ -135,7 +135,7 @@ unsafe extern "system" fn overlay_wndproc(
             // forwarding; SendMessageW only passes values and returns a value.
             let result = unsafe {
                 SendMessageW(
-                    Some(game),
+                    game,
                     WM_SETCURSOR,
                     Some(WPARAM(game.0 as usize)),
                     Some(lparam),
