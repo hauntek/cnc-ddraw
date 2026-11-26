@@ -242,3 +242,13 @@ COM class factories.
 - If the host exits, the 32-bit side logs the failure and retries on the next
   present tick; on native Windows it can still fall back to the in-process
   renderer.
+- The default host present path is a CPU nearest-neighbour upscale followed by
+  `copy_texture_to_texture`, because on wgpu 27 / DX12 / D3DMetal any draw
+  through a pipeline that declares a bind group produces no pixels (see the
+  presenter notes above). This costs roughly one 1440x1080 RGBA rescale per
+  *new* game frame on the CPU, and only when the frame or the window size
+  changes. `CNC_DDRAW_HOST_GPU=1` still selects the render-pipeline path for
+  environments where descriptor bindings work.
+- Frame output is nearest-neighbour scaled; there is no bilinear filtering in
+  the CPU path yet, so non-integer scale factors (e.g. 800x600 to 1440x1080)
+  show slightly hard pixel edges.
