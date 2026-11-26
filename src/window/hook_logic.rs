@@ -230,6 +230,9 @@ pub(super) fn rewrite_getmsg(msg: &mut MSG) {
         return;
     }
     let (lx, ly) = client_to_logical(bound, cursor.x, cursor.y, w, h);
+    let was_click = msg.message == WM_LBUTTONDOWN;
+    let from = msg.hwnd;
+    let original = msg.pt;
     msg.pt = POINT { x: lx, y: ly };
     if !is_mouse_message(msg.message) {
         return;
@@ -247,6 +250,19 @@ pub(super) fn rewrite_getmsg(msg: &mut MSG) {
         hit_test_logical_child(bound, lx, ly).unwrap_or(bound)
     };
     msg.hwnd = target;
+    if was_click {
+        crate::compat::log_msg(&format!(
+            "getmsg: from=0x{:x} msg_pt=({},{}) client=({},{}) logical=({},{}) target=0x{:x}",
+            from.0 as usize,
+            original.x,
+            original.y,
+            cursor.x,
+            cursor.y,
+            lx,
+            ly,
+            target.0 as usize
+        ));
+    }
     if msg.message == WM_MOUSEWHEEL || target == bound {
         msg.lParam = LPARAM(((ly as u16 as u32) << 16 | (lx as u16 as u32)) as isize);
     } else {
@@ -324,6 +340,16 @@ pub(super) fn handle_subclass_message(
     }
     if matches!(msg, WM_MOVE | WM_SIZE | WM_WINDOWPOSCHANGED) && bound_hwnd() == Some(hwnd) {
         crate::draw::on_host_window_changed();
+    }
+    if msg == WM_LBUTTONDOWN {
+        let raw = lparam.0 as u32;
+        crate::compat::log_msg(&format!(
+            "subclass: hwnd=0x{:x} lparam=({},{}) wparam=0x{:x}",
+            hwnd.0 as usize,
+            (raw & 0xffff) as i16 as i32,
+            ((raw >> 16) & 0xffff) as i16 as i32,
+            wparam.0
+        ));
     }
     // No coordinate remapping here: every mouse message is posted to the thread
     // queue, so it already went through the `WH_GETMESSAGE` hook, which rewrote
