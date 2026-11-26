@@ -9,13 +9,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MSG, SET_WINDOW_POS_FLAGS, SM_CXSCREEN, SM_CXFULLSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
     SM_CYFULLSCREEN, SM_CYVIRTUALSCREEN, WM_ACTIVATE, WM_ACTIVATEAPP, WM_KILLFOCUS,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE,
-    WM_NCACTIVATE, WM_RBUTTONDOWN, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER,
+    WM_NCACTIVATE, WM_RBUTTONDOWN, WM_SETCURSOR, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER,
     WM_WINDOWPOSCHANGED,
 };
 
 use crate::config;
 use crate::win32::geometry::{
-    client_to_screen, clip_cursor, cursor_pos, map_rect, screen_to_client, set_cursor_pos,
+    client_to_screen, clip_cursor, cursor_pos, map_rect, screen_to_client, set_cursor, set_cursor_pos,
     window_from_point, window_rect,
 };
 use crate::win32::hwnd::{
@@ -31,6 +31,26 @@ use super::{
     bound_hwnd, is_present_hwnd, is_scaling_active, logical_mode, FLUSH_TIMER_ID,
     WM_APP_FLUSH,
 };
+
+/// Whether the game last asked for the system pointer to be hidden.
+///
+/// Old games hide it with `SetCursor(NULL)` (or `ShowCursor(FALSE)`) and then draw their own
+/// pointer, but they do not re-assert it on every `WM_SETCURSOR`. Any window that lets the default
+/// handler run - the presenter overlay, or a game dialog - puts the arrow back, so the intent is
+/// recorded here and re-applied whenever the game window is asked for its cursor.
+static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn note_set_cursor(hidden: bool) {
+    CURSOR_HIDDEN.store(hidden, Ordering::Relaxed);
+}
+
+pub(super) fn note_show_cursor(count: i32) {
+    CURSOR_HIDDEN.store(count < 0, Ordering::Relaxed);
+}
+
+pub(super) fn cursor_hidden() -> bool {
+    CURSOR_HIDDEN.load(Ordering::Relaxed)
+}
 
 pub(super) fn virtual_window_rect(hwnd: HWND, include_dialogs: bool) -> Option<RECT> {
     static CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -399,6 +419,11 @@ pub(super) fn handle_subclass_message(
                 return SubclassAction::Return(LRESULT(0));
             }
         }
+    }
+    if msg == WM_SETCURSOR && bound_hwnd() == Some(hwnd) && cursor_hidden() {
+        // Keep the pointer hidden even though the default handler would restore the arrow.
+        let _ = set_cursor(None);
+        return SubclassAction::Return(LRESULT(1));
     }
     if matches!(msg, WM_MOVE | WM_SIZE | WM_WINDOWPOSCHANGED) && bound_hwnd() == Some(hwnd) {
         crate::draw::on_host_window_changed();

@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, ClipCursor, GetClientRect, GetCursorPos, GetWindowRect, IsWindow,
-    SetCursorPos, WindowFromPoint, WINDOW_EX_STYLE, WINDOW_STYLE,
+    SetCursor, SetCursorPos, WindowFromPoint, HCURSOR, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 
 pub(crate) fn is_window(hwnd: HWND) -> bool {
@@ -95,6 +95,12 @@ pub(crate) fn cursor_pos() -> Result<POINT> {
     // SAFETY: `pt` is a valid writable POINT.
     unsafe { GetCursorPos(&mut pt)? };
     Ok(pt)
+}
+
+/// Installs `cursor` (NULL hides the system pointer) and returns the previous cursor.
+pub(crate) fn set_cursor(cursor: Option<HCURSOR>) -> HCURSOR {
+    // SAFETY: The caller passes either NULL or a live cursor handle.
+    unsafe { SetCursor(cursor) }
 }
 
 pub(crate) fn set_cursor_pos(x: i32, y: i32) -> bool {

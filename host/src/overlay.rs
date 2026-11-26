@@ -17,11 +17,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetForegroundWindow, HTCLIENT, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible,
-    MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowPos, ShowWindow, TranslateMessage,
-    WM_ERASEBKGND, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW, SendMessageW,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowPos, ShowWindow,
+    TranslateMessage, WM_ERASEBKGND, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEACTIVATE,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_NCHITTEST,
-    WM_PAINT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    WM_PAINT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_XBUTTONDOWN,
+    WM_XBUTTONUP,
     WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
@@ -120,6 +122,42 @@ unsafe extern "system" fn overlay_wndproc(
         }
     }
     match msg {
+        // Let the game decide the cursor. The overlay owns the pointer, so without
+        // this the default handler keeps resetting the class cursor (an arrow) and a
+        // game that hides the pointer or draws its own never takes effect.
+        WM_SETCURSOR => {
+            let target = INPUT_TARGET.load(Ordering::Relaxed);
+            if target == 0 {
+                return LRESULT(0);
+            }
+            let game = HWND(target as *mut c_void);
+            // SAFETY: `game` is the window handle the producer bound for input
+            // forwarding; SendMessageW only passes values and returns a value.
+            let result = unsafe {
+                SendMessageW(
+                    Some(game),
+                    WM_SETCURSOR,
+                    Some(WPARAM(game.0 as usize)),
+                    Some(lparam),
+                )
+            };
+            // Sample the answer: a non-zero result means the game handled the cursor
+            // itself (and may have hidden it), zero means it did not care about this one.
+            static CALLS: AtomicUsize = AtomicUsize::new(0);
+            if CALLS.fetch_add(1, Ordering::Relaxed) < 4 {
+                crate::logging::log_msg(&format!(
+                    "overlay: setcursor lparam=0x{:x} game_returned={}",
+                    lparam.0,
+                    result.0
+                ));
+            }
+            if result.0 != 0 {
+                return result;
+            }
+            // Claim the message without touching the cursor: letting the default handler run
+            // would restore the arrow, which then shows up next to the game's own pointer.
+            return LRESULT(1);
+        }
         // Always claim the mouse. Answering `HTTRANSPARENT` here makes Wine drop
         // the click (the window is skipped by `WindowFromPoint` yet still owns the
         // input), so the overlay has to take the click and forward it instead.
