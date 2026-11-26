@@ -289,15 +289,6 @@ impl FrameSink {
             .build_lut()
             .map_err(|err| format!("building frame LUT: {err}"))?;
 
-        if !self.first_submit.swap(true, Ordering::Relaxed) {
-            let sample = &pixels[..pixels.len().min(32)];
-            // SAFETY: `header` points into the live mapping owned by this sink.
-            let lut_gen = unsafe { (*self.header).lut_gen };
-            crate::compat::log_msg(&format!(
-                "host frame: {width}x{height} pitch={pitch} format={format:?} lut_gen={lut_gen} first={sample:02x?} lut0={:?}",
-                &lut[..4]
-            ));
-        }
         // SAFETY: `header` points into the live mapping owned by this sink.
         let seq = unsafe { (*self.header).seq.load(Ordering::Relaxed) };
         let index = ((seq as usize) + 1) % protocol::SLOT_COUNT;
@@ -336,6 +327,17 @@ impl FrameSink {
             }
         }
 
+        if !self.first_submit.swap(true, Ordering::Relaxed) {
+            // SAFETY: `destination` points at a slot with `pitch * height`
+            // initialized bytes.
+            let sample = unsafe { std::slice::from_raw_parts(destination, 32.min(pitch as usize)) };
+            // SAFETY: `header` points into the live mapping owned by this sink.
+            let lut_gen = unsafe { (*self.header).lut_gen };
+            crate::compat::log_msg(&format!(
+                "host frame: {width}x{height} pitch={pitch} format={format:?} lut_gen={lut_gen} first={sample:02x?} lut0={:?}",
+                &lut[..4]
+            ));
+        }
         // SAFETY: This struct owns `header`, and the host only publishes frames
         // after observing the release-store to `seq`.
         unsafe {

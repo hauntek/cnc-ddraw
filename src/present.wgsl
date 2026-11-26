@@ -24,6 +24,10 @@ fn vs(@builtin(vertex_index) index: u32) -> Vertex {
 
 @fragment
 fn fs(input: Vertex) -> @location(0) vec4<f32> {
+    // 99 = host-side solid-color diagnostic (CNC_DDRAW_HOST_SOLID=1).
+    if params.format == 99u {
+        return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    }
     let size = vec2<i32>(textureDimensions(raw_frame));
     let pixel = clamp(vec2<i32>(input.uv * vec2<f32>(size)), vec2<i32>(0), size - vec2<i32>(1));
     let raw = textureLoad(raw_frame, pixel, 0).r;

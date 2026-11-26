@@ -1,7 +1,9 @@
-//! 64-bit wgpu DX12 presenter. This is the host-side twin of the old in-process
-//! renderer: it uploads raw primary-surface bytes from shared memory, unpacks
-//! them in WGSL, and presents through the 64-bit host overlay window (D3DMetal
-//! on macOS Wine).
+//! 64-bit wgpu DX12 presenter.
+//!
+//! The host deliberately converts the 32-bit game's raw primary surface to
+//! RGBA8 on the CPU. On Wine/D3DMetal the integer-texture + LUT path used by the
+//! legacy in-process renderer has proven fragile; an RGBA8 texture with a plain
+//! `textureLoad` is the safest presentation path for the 64-bit host.
 use std::num::NonZeroIsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -14,121 +16,8 @@ use protocol::{FrameFormat, Header};
 
 use crate::logging;
 
-fn raw_texture_format(format: FrameFormat) -> wgpu::TextureFormat {
-    match format {
-        FrameFormat::Indexed => wgpu::TextureFormat::R8Uint,
-        FrameFormat::Rgb555 | FrameFormat::Rgb565 => wgpu::TextureFormat::R16Uint,
-        FrameFormat::Xrgb => wgpu::TextureFormat::R32Uint,
-    }
-}
-
-fn params_bytes(format: FrameFormat) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    out[..4].copy_from_slice(&(format as u32).to_le_bytes());
-    out
-}
-
 fn align_up(value: u32, alignment: u32) -> u32 {
     (value + alignment - 1) & !(alignment - 1)
-}
-
-struct UploadedFrame {
-    raw_texture: wgpu::Texture,
-    raw_format: wgpu::TextureFormat,
-    lut_texture: wgpu::Texture,
-    params_buffer: wgpu::Buffer,
-    bindings: wgpu::BindGroup,
-    last_format: Option<FrameFormat>,
-    last_lut_gen: Option<u32>,
-}
-
-impl UploadedFrame {
-    fn new(
-        device: &wgpu::Device,
-        pipeline: &wgpu::RenderPipeline,
-        target_format: wgpu::TextureFormat,
-        size: wgpu::Extent3d,
-        raw_format: wgpu::TextureFormat,
-    ) -> Self {
-        let raw_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("DirectDraw raw primary pixels"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: raw_format,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let lut_format = if target_format.is_srgb() {
-            wgpu::TextureFormat::Rgba8UnormSrgb
-        } else {
-            wgpu::TextureFormat::Rgba8Unorm
-        };
-        let lut_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("DirectDraw palette/gamma LUT"),
-            size: wgpu::Extent3d {
-                width: 256,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: lut_format,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("DirectDraw present params"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let raw_view = raw_texture.create_view(&Default::default());
-        let lut_view = lut_texture.create_view(&Default::default());
-        let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("DirectDraw frame bindings"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&lut_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: params_buffer.as_entire_binding(),
-                },
-            ],
-        });
-        Self {
-            raw_texture,
-            raw_format,
-            lut_texture,
-            params_buffer,
-            bindings,
-            last_format: None,
-            last_lut_gen: None,
-        }
-    }
-}
-
-fn instance_descriptor(backend: &str) -> wgpu::InstanceDescriptor {
-    if std::env::var_os("WGPU_BACKEND").is_some() {
-        return wgpu::InstanceDescriptor::from_env_or_default();
-    }
-    let backends = match backend.to_ascii_lowercase().as_str() {
-        "vulkan" | "vk" => wgpu::Backends::VULKAN,
-        _ => wgpu::Backends::DX12,
-    };
-    wgpu::InstanceDescriptor {
-        backends,
-        ..Default::default()
-    }
 }
 
 fn debug_clear() -> Option<wgpu::Color> {
@@ -160,6 +49,64 @@ fn debug_clear() -> Option<wgpu::Color> {
     })
 }
 
+struct UploadedFrame {
+    raw_texture: wgpu::Texture,
+    bindings: wgpu::BindGroup,
+}
+
+impl UploadedFrame {
+    fn new(
+        device: &wgpu::Device,
+        pipeline: &wgpu::RenderPipeline,
+        target_format: wgpu::TextureFormat,
+        size: wgpu::Extent3d,
+    ) -> Self {
+        // Deliberately UNORM: D3DMetal's sRGB texture path is one of the
+        // suspects for the black output. This may look slightly bright on an
+        // sRGB swapchain, but it is visible and lets us separate colorspace
+        // from a completely broken sample/upload path.
+        let _ = target_format;
+        let raw_format = wgpu::TextureFormat::Rgba8Unorm;
+        let raw_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("DirectDraw RGBA primary"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: raw_format,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let raw_view = raw_texture.create_view(&Default::default());
+        let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("DirectDraw frame bindings"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&raw_view),
+            }],
+        });
+        Self {
+            raw_texture,
+            bindings,
+        }
+    }
+}
+
+fn instance_descriptor(backend: &str) -> wgpu::InstanceDescriptor {
+    if std::env::var_os("WGPU_BACKEND").is_some() {
+        return wgpu::InstanceDescriptor::from_env_or_default();
+    }
+    let backends = match backend.to_ascii_lowercase().as_str() {
+        "vulkan" | "vk" => wgpu::Backends::VULKAN,
+        _ => wgpu::Backends::DX12,
+    };
+    wgpu::InstanceDescriptor {
+        backends,
+        ..Default::default()
+    }
+}
+
 pub struct Presenter {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -172,6 +119,7 @@ pub struct Presenter {
     maintas: bool,
     clear_color: wgpu::Color,
     clear_only: bool,
+    solid: bool,
     logged_frame: bool,
     logged_present: bool,
     frame_count: u64,
@@ -192,8 +140,8 @@ impl Presenter {
         );
 
         let instance = wgpu::Instance::new(&instance_descriptor(backend));
-        // SAFETY: `Overlay` outlives `Presenter` (field order in `App`), so the
-        // raw HWND stays valid for the whole surface lifetime.
+        // SAFETY: `Overlay` outlives `Presenter` (declaration order in `run`), so
+        // the raw HWND stays valid for the whole surface lifetime.
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_window_handle: raw.into(),
@@ -230,16 +178,13 @@ impl Presenter {
         let mut surface_cfg = surface
             .get_default_config(&adapter, 1, 1)
             .ok_or("no presentation format for the host overlay")?;
-        // Wine DXGI has incomplete Mailbox/Immediate support. Fifo is the only
-        // present mode we trust for D3DMetal and for pacing the 32-bit game.
+        // Wine DXGI has incomplete Mailbox/Immediate support.
         surface_cfg.present_mode = wgpu::PresentMode::Fifo;
-        // Force an opaque swapchain. If the overlay is treated as transparent by
-        // Wine/D3DMetal, the WindowServer can composite the desktop instead of
-        // the presented frame, which looks exactly like a black screen.
+        // Never let Wine/D3DMetal composite the desktop through the overlay.
         surface_cfg.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("DirectDraw GPU unpack and blit"),
+            label: Some("DirectDraw RGBA present"),
             source: wgpu::ShaderSource::Wgsl(include_str!("present.wgsl").into()),
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -266,8 +211,9 @@ impl Presenter {
 
         let clear_color = debug_clear().unwrap_or(wgpu::Color::BLACK);
         let clear_only = std::env::var_os("CNC_DDRAW_HOST_CLEAR").is_some();
+        let solid = std::env::var_os("CNC_DDRAW_HOST_SOLID").is_some();
         logging::log_msg(&format!(
-            "presenter init: format={:?} clear_only={clear_only}",
+            "presenter init: format={:?} clear_only={clear_only} solid={solid}",
             surface_cfg.format
         ));
 
@@ -283,6 +229,7 @@ impl Presenter {
             maintas,
             clear_color,
             clear_only,
+            solid,
             logged_frame: false,
             logged_present: false,
             frame_count: 0,
@@ -294,7 +241,10 @@ impl Presenter {
         let width = header.width;
         let height = header.height;
         let pitch = header.pitch;
-        if width == 0 || height == 0 || width > protocol::MAX_WIDTH || height > protocol::MAX_HEIGHT
+        if width == 0
+            || height == 0
+            || width > protocol::MAX_WIDTH
+            || height > protocol::MAX_HEIGHT
         {
             return Err(format!("unsupported frame size {width}x{height}"));
         }
@@ -302,8 +252,7 @@ impl Presenter {
         let min_pitch = width
             .checked_mul(bpp)
             .ok_or_else(|| "frame pitch overflow".to_string())?;
-        if pitch < min_pitch
-            || u64::from(pitch) * u64::from(height) > u64::from(header.slot_bytes)
+        if pitch < min_pitch || u64::from(pitch) * u64::from(height) > u64::from(header.slot_bytes)
         {
             return Err("invalid frame pitch/length".to_string());
         }
@@ -316,8 +265,8 @@ impl Presenter {
             let sample = unsafe { std::slice::from_raw_parts(base, total) };
             let nonzero = sample.iter().filter(|&&b| b != 0).count();
             let head = &sample[..sample.len().min(32)];
-            let mid = &sample[(height as usize / 2) * pitch as usize..]
-                [..(pitch as usize).min(32)];
+            let mid =
+                &sample[(height as usize / 2) * pitch as usize..][..(pitch as usize).min(32)];
             logging::log_msg(&format!(
                 "first frame: {width}x{height} pitch={pitch} format={format:?} lut_gen={} nonzero={nonzero}/{total} head={head:02x?} mid={mid:02x?} lut0={:?}",
                 header.lut_gen,
@@ -328,8 +277,8 @@ impl Presenter {
             // SAFETY: The producer guarantees pitch * height bytes at `base`.
             let sample = unsafe { std::slice::from_raw_parts(base, total) };
             let nonzero = sample.iter().filter(|&&b| b != 0).count();
-            let mid = &sample[(height as usize / 2) * pitch as usize..]
-                [..(pitch as usize).min(32)];
+            let mid =
+                &sample[(height as usize / 2) * pitch as usize..][..(pitch as usize).min(32)];
             logging::log_msg(&format!(
                 "frame #{}: seq={} {width}x{height} format={format:?} nonzero={nonzero}/{total} mid={mid:02x?}",
                 self.frame_count,
@@ -342,11 +291,10 @@ impl Presenter {
             height,
             depth_or_array_layers: 1,
         };
-        let raw_format = raw_texture_format(format);
         if self
             .frame
             .as_ref()
-            .is_some_and(|frame| frame.raw_texture.size() != size || frame.raw_format != raw_format)
+            .is_some_and(|frame| frame.raw_texture.size() != size)
         {
             self.frame = None;
         }
@@ -356,51 +304,80 @@ impl Presenter {
                 &self.pipeline,
                 self.config.format,
                 size,
-                raw_format,
             )
         });
 
-        if frame.last_format != Some(format) {
-            self.queue
-                .write_buffer(&frame.params_buffer, 0, &params_bytes(format));
-            frame.last_format = Some(format);
-        }
-        if frame.last_lut_gen != Some(header.lut_gen) {
-            let lut_bytes: &[u8] = header.lut.as_flattened();
-            self.queue.write_texture(
-                frame.lut_texture.as_image_copy(),
-                lut_bytes,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(256 * 4),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: 256,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-            );
-            frame.last_lut_gen = Some(header.lut_gen);
-        }
-
-        // wgpu requires a 256-byte row alignment for texture uploads. Re-pack
-        // rows into a host-owned staging buffer so odd 8-bit pitches work.
-        let aligned_pitch = align_up(pitch, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) as usize;
-        let needed = aligned_pitch
+        let out_pitch = align_up(
+            width.checked_mul(4).ok_or_else(|| "rgba pitch overflow".to_string())?,
+            wgpu::COPY_BYTES_PER_ROW_ALIGNMENT,
+        ) as usize;
+        let needed = out_pitch
             .checked_mul(height as usize)
-            .ok_or_else(|| "staging size overflow".to_string())?;
+            .ok_or_else(|| "rgba staging size overflow".to_string())?;
         if self.staging.len() < needed {
             self.staging.resize(needed, 0);
         }
-        for row in 0..height as usize {
-            let src = unsafe { base.add(row * pitch as usize) };
-            let dst = &mut self.staging[row * aligned_pitch..(row + 1) * aligned_pitch];
-            // SAFETY: The producer guarantees pitch * height bytes at `base`.
-            unsafe {
-                std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), pitch as usize);
+        // SAFETY: The producer guarantees pitch * height bytes at `base`.
+        let source = unsafe { std::slice::from_raw_parts(base, pitch as usize * height as usize) };
+        let lut = &header.lut;
+
+        for y in 0..height as usize {
+            let src = &source[y * pitch as usize..];
+            let dst = &mut self.staging[y * out_pitch..(y + 1) * out_pitch];
+            if self.solid {
+                for x in 0..width as usize {
+                    dst[x * 4..x * 4 + 4].copy_from_slice(&[255, 0, 0, 255]);
+                }
+            } else {
+                match format {
+                    FrameFormat::Indexed => {
+                        for x in 0..width as usize {
+                            let entry = lut[src[x] as usize];
+                            dst[x * 4..x * 4 + 4].copy_from_slice(&entry);
+                        }
+                    }
+                    FrameFormat::Rgb555 | FrameFormat::Rgb565 => {
+                        for x in 0..width as usize {
+                            let raw = u16::from_le_bytes([src[x * 2], src[x * 2 + 1]]);
+                            let (r, g, b) = if format == FrameFormat::Rgb555 {
+                                (
+                                    (((raw >> 10) & 31) * 255 / 31) as u8,
+                                    (((raw >> 5) & 31) * 255 / 31) as u8,
+                                    ((raw & 31) * 255 / 31) as u8,
+                                )
+                            } else {
+                                (
+                                    (((raw >> 11) & 31) * 255 / 31) as u8,
+                                    (((raw >> 5) & 63) * 255 / 63) as u8,
+                                    ((raw & 31) * 255 / 31) as u8,
+                                )
+                            };
+                            dst[x * 4] = lut[r as usize][0];
+                            dst[x * 4 + 1] = lut[g as usize][1];
+                            dst[x * 4 + 2] = lut[b as usize][2];
+                            dst[x * 4 + 3] = 255;
+                        }
+                    }
+                    FrameFormat::Xrgb => {
+                        for x in 0..width as usize {
+                            let raw = u32::from_le_bytes([
+                                src[x * 4],
+                                src[x * 4 + 1],
+                                src[x * 4 + 2],
+                                src[x * 4 + 3],
+                            ]);
+                            let r = ((raw >> 16) & 0xff) as u8;
+                            let g = ((raw >> 8) & 0xff) as u8;
+                            let b = (raw & 0xff) as u8;
+                            dst[x * 4] = lut[r as usize][0];
+                            dst[x * 4 + 1] = lut[g as usize][1];
+                            dst[x * 4 + 2] = lut[b as usize][2];
+                            dst[x * 4 + 3] = 255;
+                        }
+                    }
+                }
             }
-            dst[pitch as usize..].fill(0);
+            dst[width as usize * 4..].fill(0);
         }
 
         self.queue.write_texture(
@@ -408,7 +385,7 @@ impl Presenter {
             &self.staging[..needed],
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(aligned_pitch as u32),
+                bytes_per_row: Some(out_pitch as u32),
                 rows_per_image: None,
             },
             size,
@@ -420,10 +397,7 @@ impl Presenter {
         if target_w == 0 || target_h == 0 {
             return Ok(());
         }
-        if !self.configured
-            || self.config.width != target_w
-            || self.config.height != target_h
-        {
+        if !self.configured || self.config.width != target_w || self.config.height != target_h {
             self.config.width = target_w;
             self.config.height = target_h;
             self.surface.configure(&self.device, &self.config);
@@ -486,6 +460,7 @@ impl Presenter {
                     self.maintas,
                 );
                 pass.set_viewport(vx as f32, vy as f32, vw as f32, vh as f32, 0.0, 1.0);
+                pass.set_scissor_rect(vx, vy, vw, vh);
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &frame.bindings, &[]);
                 pass.draw(0..3, 0..1);
