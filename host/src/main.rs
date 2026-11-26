@@ -2,10 +2,10 @@
 //!
 //! The 32-bit `ddraw.dll` owns DirectDraw semantics and publishes complete
 //! primary-surface frames through a shared-memory ring. This process owns the
-//! wgpu DX12 device and an overlay window that deliberately claims mouse input
-//! (Wine drops clicks aimed at a `HTTRANSPARENT` window) and forwards it to the
-//! game, so on macOS Wine the D3DMetal 64-bit path is used instead of a 32-bit
-//! D3D12 stack.
+//! wgpu DX12 device and a click-through overlay window (`WS_EX_TRANSPARENT` +
+//! `HTTRANSPARENT`, kept enabled) so the game below keeps receiving real mouse
+//! input while the overlay only presents. On macOS Wine this is the D3DMetal
+//! 64-bit path instead of a 32-bit D3D12 stack.
 #![windows_subsystem = "windows"]
 
 mod ipc;
@@ -347,17 +347,16 @@ fn run() -> Result<(), String> {
         args.maintas,
         args.vsync,
     )?;
-    // Keep the overlay enabled. `WS_EX_TRANSPARENT` plus `HTTRANSPARENT` already
-    // make the hit test skip it, which the `hit probe` confirms: with the window
-    // enabled the probe reports the game window (or one of its children) under
-    // the cursor, while a *disabled* window is reported as the hit target and
-    // then drops the input because it cannot receive mouse messages. That made
-    // clicks disappear entirely - keyboard and cursor tracking still worked
-    // because the game polls `GetCursorPos` and reads keys from its own queue.
+    // Keep the overlay enabled and click-through. `WS_EX_TRANSPARENT` plus
+    // `HTTRANSPARENT` make the hit test skip it, which the `hit probe` confirms:
+    // the probe reports the game window (or one of its children) under the
+    // cursor, so real mouse input reaches the game natively and updates its
+    // thread key state. A posted `WM_LBUTTONDOWN` does not, which is why taking
+    // the click here and forwarding it made menu buttons dead in fullscreen.
     if std::env::var_os("CNC_DDRAW_HOST_OVERLAY_DISABLE").is_some() {
         overlay.make_click_through();
     } else {
-        logging::log_msg("overlay: interactive, hit-testing skips it");
+        logging::log_msg("overlay: click-through, mouse input reaches the game");
     }
     logging::log_msg("present target: overlay");
     logging::log_msg("host ready");

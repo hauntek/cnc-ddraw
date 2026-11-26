@@ -2,10 +2,13 @@
 //! a window created by the same process, while the 32-bit game keeps focus and
 //! its own dialogs.
 //!
-//! The overlay is the mouse input target on purpose: Wine drops clicks aimed at
-//! a window that answers `WM_NCHITTEST` with `HTTRANSPARENT`, so the overlay
-//! takes the click instead, rescales it to the game's frame size and posts it to
-//! the game window - the same approach the original in-process renderer used.
+//! The overlay is click-through: it carries `WS_EX_TRANSPARENT` and answers
+//! `WM_NCHITTEST` with `HTTRANSPARENT` while staying enabled, so hit-testing
+//! skips it and the game window below receives the click natively. That matters
+//! beyond routing - a posted `WM_LBUTTONDOWN` does not update the game thread's
+//! own key state, and a game that polls `GetKeyState` (RA2 does) ignores
+//! synthetic clicks. Forwarding is kept only as a fallback for a stack that
+//! still routes mouse messages to the overlay.
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
@@ -16,14 +19,14 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, HTCLIENT, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible,
+    GetForegroundWindow, HTTRANSPARENT, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible,
     GWLP_HWNDPARENT, MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW,
     SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, TranslateMessage,
     WM_ERASEBKGND, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_NCHITTEST,
     WM_PAINT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 /// Game window that receives forwarded mouse input.
@@ -140,11 +143,11 @@ unsafe extern "system" fn overlay_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    // The overlay is the input target (see `WM_NCHITTEST`), so every mouse
-    // message arrives here and has to be re-posted to the game with the
-    // coordinates the game expects. That is what the original in-process
-    // renderer did: it converted to its logical resolution and posted the
-    // message on, instead of trying to be click-through.
+    // Fallback only: with `WS_EX_TRANSPARENT` plus `HTTRANSPARENT` the hit test
+    // skips this window and the game below receives the real input. If a stack
+    // still routes a mouse message here, re-post it with the frame coordinates
+    // so the game at least sees the click, though a synthetic message does not
+    // update its thread key state the way real input does.
     if is_mouse_input(msg) {
         let target = INPUT_TARGET.load(Ordering::Relaxed);
         if target != 0 {
@@ -191,10 +194,11 @@ unsafe extern "system" fn overlay_wndproc(
         }
     }
     match msg {
-        // Always claim the mouse. Answering `HTTRANSPARENT` here makes Wine drop
-        // the click (the window is skipped by `WindowFromPoint` yet still owns the
-        // input), so the overlay has to take the click and forward it instead.
-        WM_NCHITTEST => LRESULT(HTCLIENT as isize),
+        // Click-through: the game window below must receive the real mouse
+        // input. Forwarding a posted button message is not equivalent (the
+        // game thread's `GetKeyState` never sees it), and the overlay covers
+        // exactly the window the player is aiming at.
+        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
@@ -237,7 +241,7 @@ impl Overlay {
         // created hidden (no WS_VISIBLE) and shown later with SW_SHOWNOACTIVATE.
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
                 class_name,
                 w!(""),
                 WS_POPUP,
@@ -283,16 +287,13 @@ impl Overlay {
         self.hinstance
     }
 
-    /// Disable the overlay window, which takes it out of input routing.
+    /// Disable the overlay window entirely (`CNC_DDRAW_HOST_OVERLAY_DISABLE`).
     ///
-    /// This is **not** the default and loses every click under Wine: a disabled
-    /// window is still returned by `WindowFromPoint`, so it stays the input
-    /// target, but it can no longer receive mouse messages. The overlay normally
-    /// claims the mouse (`HTCLIENT`) and forwards it to the game.
-    ///
-    /// Kept for the case where a stack routes input to the overlay even though
-    /// it is transparent; called after the swapchain exists so DXGI never has to
-    /// deal with a disabled window during surface creation.
+    /// The overlay is already click-through (`WS_EX_TRANSPARENT` plus
+    /// `HTTRANSPARENT`); disabling it is a diagnostic escape hatch for a stack
+    /// that still routes input to the overlay. Called after the swapchain
+    /// exists so DXGI never deals with a disabled window during surface
+    /// creation.
     pub fn make_click_through(&mut self) {
         // SAFETY: `self.hwnd` is a live window owned by this process.
         let was_enabled = unsafe { EnableWindow(self.hwnd, false) }.as_bool();
