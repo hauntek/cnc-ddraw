@@ -402,6 +402,28 @@ pub(super) fn handle_subclass_message(
     }
     if matches!(msg, WM_MOVE | WM_SIZE | WM_WINDOWPOSCHANGED) && bound_hwnd() == Some(hwnd) {
         crate::draw::on_host_window_changed();
+        if is_scaling_active() && logical_mode().is_none() {
+            // The surface size is not known yet, so there is no virtual size to report - but the
+            // real one must not reach the game either: it caches the window/client geometry from
+            // these messages and then scales every mouse position by the ratio between the window
+            // and the surface for the rest of the run, which offsets every click.
+            static HIDDEN: AtomicUsize = AtomicUsize::new(0);
+            if HIDDEN.fetch_add(1, Ordering::Relaxed) < 4 {
+                let raw = lparam.0 as u32;
+                crate::compat::log_msg(&format!(
+                    "size: hwnd=0x{:x} msg=0x{:x} hidden=({},{}) logical=none",
+                    hwnd.0 as usize,
+                    msg,
+                    (raw & 0xffff) as i16 as i32,
+                    ((raw >> 16) & 0xffff) as i16 as i32
+                ));
+            }
+            return if msg == WM_MOVE {
+                SubclassAction::Forward(LPARAM(0))
+            } else {
+                SubclassAction::Return(LRESULT(0))
+            };
+        }
         // `WM_MOVE` carries the real client-area origin in screen pixels. The game's window is
         // pretended to sit at the screen origin - that is what makes `ScreenToClient` and
         // `GetCursorPos` agree - so report (0, 0) like `GetWindowRect` does. A game that subtracts

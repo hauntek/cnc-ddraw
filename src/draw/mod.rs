@@ -547,18 +547,12 @@ impl IDirectDraw_Impl for Draw_Impl {
         if let Some(saved) = display.set_host(None) {
             saved.restore()?;
         }
-        if manage_window {
-            let cfg = config::get();
-            let initial_mode = if cfg.windowed {
-                PresentationMode::Windowed
-            } else {
-                PresentationMode::BorderlessFullscreen
-            };
-            let host = HostWindow::enter(hwnd, initial_mode, display.width, display.height, cfg)?;
-            display.set_host(Some(host));
-        }
         self.exclusive.store(exclusive, Ordering::Release);
         self.manage_window.store(manage_window, Ordering::Release);
+        // Bind *before* the host block resizes the window: that resize sends `WM_SIZE` /
+        // `WM_WINDOWPOSCHANGED` carrying the real client size, and while the primary surface size
+        // is still unknown there is no virtual size to report - only the subclass installed here
+        // can keep the real geometry away from the game.
         if change_hwnd {
             display.presentation.bound_hwnd = make_hwnd(hwnd);
             // Renderer and 64-bit host are created lazily on the first present.
@@ -582,6 +576,16 @@ impl IDirectDraw_Impl for Draw_Impl {
             }
         } else {
             window::set_scaling_active(self.bind_id.load(Ordering::Acquire), exclusive);
+        }
+        if manage_window {
+            let cfg = config::get();
+            let initial_mode = if cfg.windowed {
+                PresentationMode::Windowed
+            } else {
+                PresentationMode::BorderlessFullscreen
+            };
+            let host = HostWindow::enter(hwnd, initial_mode, display.width, display.height, cfg)?;
+            display.set_host(Some(host));
         }
         let _ = self.display.present_locked(display);
         Ok(())
