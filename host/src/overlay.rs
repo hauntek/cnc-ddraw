@@ -1,8 +1,13 @@
-//! Borderless, click-through overlay owned by the 64-bit host. D3DMetal
-//! therefore presents into a window created by the same process, while the
-//! 32-bit game keeps focus, input and its own dialogs.
+//! Borderless overlay owned by the 64-bit host. D3DMetal therefore presents into
+//! a window created by the same process, while the 32-bit game keeps focus and
+//! its own dialogs.
+//!
+//! The overlay is the mouse input target on purpose: Wine drops clicks aimed at
+//! a window that answers `WM_NCHITTEST` with `HTTRANSPARENT`, so the overlay
+//! takes the click instead, rescales it to the game's frame size and posts it to
+//! the game window - the same approach the original in-process renderer used.
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -11,22 +16,37 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, HTTRANSPARENT, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible,
+    GetForegroundWindow, HTCLIENT, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible,
     MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW, SWP_NOACTIVATE,
     SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, SetWindowPos, ShowWindow, TranslateMessage,
     WM_ERASEBKGND, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_NCHITTEST,
     WM_PAINT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
-/// Game window that receives mouse input the overlay happens to receive.
+/// Game window that receives forwarded mouse input.
 static INPUT_TARGET: AtomicUsize = AtomicUsize::new(0);
 
-/// Register the window that should receive forwarded mouse input. Must be
-/// called before the overlay is shown.
+/// Frame size the game is drawing (`(width << 16) | height`), used to turn
+/// overlay client pixels back into the game's own coordinate space.
+static FRAME_SIZE: AtomicU32 = AtomicU32::new(0);
+
+/// Register the window that should receive forwarded mouse input.
 pub fn set_input_target(game: HWND) {
     INPUT_TARGET.store(game.0 as usize, Ordering::Relaxed);
+}
+
+/// Tell the overlay how large the game's frame is, so forwarded clicks carry
+/// coordinates in that space rather than overlay pixels.
+pub fn set_frame_size(width: u32, height: u32) {
+    FRAME_SIZE.store((width.min(0xffff) << 16) | height.min(0xffff), Ordering::Relaxed);
+}
+
+fn frame_size() -> Option<(u32, u32)> {
+    let packed = FRAME_SIZE.load(Ordering::Relaxed);
+    let (width, height) = (packed >> 16, packed & 0xffff);
+    (width > 0 && height > 0).then_some((width, height))
 }
 
 fn is_mouse_input(msg: u32) -> bool {
@@ -54,29 +74,56 @@ unsafe extern "system" fn overlay_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    // The overlay covers exactly the game's client area, so client-relative
-    // mouse coordinates are already valid for the game window and can be
-    // forwarded unchanged. `WM_MOUSEWHEEL`/`WM_MOUSEHWHEEL` carry screen
-    // coordinates in `wparam`, which need no translation either.
+    // The overlay is the input target (see `WM_NCHITTEST`), so every mouse
+    // message arrives here and has to be re-posted to the game with the
+    // coordinates the game expects. That is what the original in-process
+    // renderer did: it converted to its logical resolution and posted the
+    // message on, instead of trying to be click-through.
     if is_mouse_input(msg) {
-        if msg == WM_LBUTTONDOWN {
-            crate::logging::log_msg(&format!(
-                "overlay: received left click lparam=0x{:x}",
-                lparam.0
-            ));
-        }
         let target = INPUT_TARGET.load(Ordering::Relaxed);
         if target != 0 {
             let game = HWND(target as *mut c_void);
+            // Wheel messages carry screen coordinates in `wparam`, which need no
+            // translation; every other mouse message packs client pixels in
+            // `lparam` and must be rescaled to the game's frame size.
+            let forwarded = if msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL {
+                lparam
+            } else {
+                let raw = lparam.0 as u32;
+                let px = (raw & 0xffff) as i16 as i32;
+                let py = ((raw >> 16) & 0xffff) as i16 as i32;
+                // SAFETY: `hwnd` is the live overlay window owned by this process.
+                let mut client = RECT::default();
+                let _ = unsafe { GetClientRect(hwnd, &mut client) };
+                let client_w = (client.right - client.left).max(1) as i64;
+                let client_h = (client.bottom - client.top).max(1) as i64;
+                let (lx, ly) = match frame_size() {
+                    Some((frame_w, frame_h)) => (
+                        (i64::from(px) * i64::from(frame_w) / client_w) as i32,
+                        (i64::from(py) * i64::from(frame_h) / client_h) as i32,
+                    ),
+                    None => (px, py),
+                };
+                if msg == WM_LBUTTONDOWN {
+                    crate::logging::log_msg(&format!(
+                        "overlay: left click overlay=({px},{py}) game=({lx},{ly}) frame={:?}",
+                        frame_size()
+                    ));
+                }
+                LPARAM((((ly as u16 as u32) << 16) | (lx as u16 as u32)) as isize)
+            };
             // SAFETY: `game` is a window handle supplied by the producer; this
             // only enqueues a message and never dereferences Rust data.
-            if unsafe { PostMessageW(Some(game), msg, wparam, lparam) }.is_ok() {
+            if unsafe { PostMessageW(Some(game), msg, wparam, forwarded) }.is_ok() {
                 return LRESULT(0);
             }
         }
     }
     match msg {
-        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        // Always claim the mouse. Answering `HTTRANSPARENT` here makes Wine drop
+        // the click (the window is skipped by `WindowFromPoint` yet still owns the
+        // input), so the overlay has to take the click and forward it instead.
+        WM_NCHITTEST => LRESULT(HTCLIENT as isize),
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
@@ -117,7 +164,7 @@ impl Overlay {
         // created hidden (no WS_VISIBLE) and shown later with SW_SHOWNOACTIVATE.
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 class_name,
                 w!(""),
                 WS_POPUP,
@@ -151,12 +198,10 @@ impl Overlay {
 
     /// Disable the overlay window, which takes it out of input routing.
     ///
-    /// This is **not** the default: measurements under Wine show that a disabled
-    /// window is still returned by `WindowFromPoint` (so it becomes the input
-    /// target) but can no longer receive mouse messages, which loses every
-    /// click. `WS_EX_TRANSPARENT` plus `WM_NCHITTEST -> HTTRANSPARENT` alone
-    /// already make the hit test skip the overlay while it stays enabled, which
-    /// is what lets clicks reach the game window underneath.
+    /// This is **not** the default and loses every click under Wine: a disabled
+    /// window is still returned by `WindowFromPoint`, so it stays the input
+    /// target, but it can no longer receive mouse messages. The overlay normally
+    /// claims the mouse (`HTCLIENT`) and forwards it to the game.
     ///
     /// Kept for the case where a stack routes input to the overlay even though
     /// it is transparent; called after the swapchain exists so DXGI never has to

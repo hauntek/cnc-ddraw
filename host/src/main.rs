@@ -2,8 +2,10 @@
 //!
 //! The 32-bit `ddraw.dll` owns DirectDraw semantics and publishes complete
 //! primary-surface frames through a shared-memory ring. This process owns the
-//! wgpu DX12 device and a click-through overlay window, so on macOS Wine the
-//! D3DMetal 64-bit path is used instead of a 32-bit D3D12 stack.
+//! wgpu DX12 device and an overlay window that deliberately claims mouse input
+//! (Wine drops clicks aimed at a `HTTRANSPARENT` window) and forwards it to the
+//! game, so on macOS Wine the D3DMetal 64-bit path is used instead of a 32-bit
+//! D3D12 stack.
 #![windows_subsystem = "windows"]
 
 mod ipc;
@@ -417,6 +419,9 @@ fn run() -> Result<(), String> {
                 Ok(()) => {
                     last_seq = seq;
                     have_frame = true;
+                    // The overlay forwards mouse input to the game, so it has to
+                    // know the frame size to rescale click coordinates.
+                    crate::overlay::set_frame_size(header.width, header.height);
                 }
                 Err(err) => logging::log_msg(&format!("frame upload rejected: {err}")),
             }
