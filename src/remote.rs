@@ -6,7 +6,7 @@
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::core::{s, w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -80,6 +80,12 @@ fn protocol_format(format: PixelFormat) -> u32 {
     format as u32
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubmitOutcome {
+    Presented,
+    Busy,
+}
+
 pub struct FrameSink {
     mapping: HANDLE,
     view: MEMORY_MAPPED_VIEW_ADDRESS,
@@ -88,6 +94,7 @@ pub struct FrameSink {
     presented_event: HANDLE,
     shutdown_event: HANDLE,
     process: HANDLE,
+    first_submit: AtomicBool,
 }
 
 // SAFETY: `FrameSink` owns OS handles and a process-wide mapping. All access is
@@ -232,6 +239,7 @@ impl FrameSink {
             presented_event,
             shutdown_event,
             process: process_info.hProcess,
+            first_submit: AtomicBool::new(false),
         })
     }
 
@@ -239,7 +247,7 @@ impl FrameSink {
         &self,
         primary: &SurfaceSlot,
         on_uploaded: impl FnOnce(),
-    ) -> Result<(), String> {
+    ) -> Result<SubmitOutcome, String> {
         // SAFETY: A zero-timeout wait is a liveness probe for the host process.
         if unsafe { WaitForSingleObject(self.process, 0) } == WAIT_OBJECT_0 {
             return Err("ddraw-host.exe has exited".to_string());
@@ -247,12 +255,12 @@ impl FrameSink {
 
         let guard = primary.lock();
         if guard.locked() {
-            return Ok(());
+            return Ok(SubmitOutcome::Busy);
         }
         let width = guard.width;
         let height = guard.height;
         if width == 0 || height == 0 {
-            return Ok(());
+            return Ok(SubmitOutcome::Busy);
         }
         if width > protocol::MAX_WIDTH || height > protocol::MAX_HEIGHT {
             return Err(format!("frame {width}x{height} exceeds protocol limit"));
@@ -274,6 +282,15 @@ impl FrameSink {
             .build_lut()
             .map_err(|err| format!("building frame LUT: {err}"))?;
 
+        if !self.first_submit.swap(true, Ordering::Relaxed) {
+            let sample = &pixels[..pixels.len().min(32)];
+            // SAFETY: `header` points into the live mapping owned by this sink.
+            let lut_gen = unsafe { (*self.header).lut_gen };
+            crate::compat::log_msg(&format!(
+                "host frame: {width}x{height} pitch={pitch} format={format:?} lut_gen={lut_gen} first={sample:02x?} lut0={:?}",
+                &lut[..4]
+            ));
+        }
         // SAFETY: `header` points into the live mapping owned by this sink.
         let seq = unsafe { (*self.header).seq.load(Ordering::Relaxed) };
         let index = ((seq as usize) + 1) % protocol::SLOT_COUNT;
@@ -325,7 +342,7 @@ impl FrameSink {
         unsafe {
             let _ = WaitForSingleObject(self.presented_event, wait_ms);
         }
-        Ok(())
+        Ok(SubmitOutcome::Presented)
     }
 }
 

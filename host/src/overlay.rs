@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, RegisterClassW, SWP_NOACTIVATE, SWP_SHOWWINDOW,
     SW_HIDE, SW_SHOWNOACTIVATE, SetWindowPos, ShowWindow, TranslateMessage, WM_ERASEBKGND,
     WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    WS_POPUP,
 };
 
 unsafe extern "system" fn overlay_wndproc(
@@ -62,7 +62,7 @@ impl Overlay {
         // created hidden (no WS_VISIBLE) and shown later with SW_SHOWNOACTIVATE.
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 class_name,
                 w!(""),
                 WS_POPUP,

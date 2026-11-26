@@ -12,7 +12,7 @@ use windows::Win32::Graphics::DirectDraw::*;
 use windows::Win32::Graphics::Gdi::HDC;
 
 use crate::config::PresenterMode;
-use crate::remote::{self, FrameSink};
+use crate::remote::{self, FrameSink, SubmitOutcome};
 use crate::renderer::{PresentError, PresentOutcome, Renderer};
 use crate::surface::{self, SurfaceSlot};
 use crate::win32::hwnd::SendHwnd;
@@ -413,12 +413,21 @@ impl Display {
                 // Clear dirty while still holding the primary surface mutex.
                 shared.dirty.store(false, Ordering::Release);
             }) {
-                Ok(()) => {
+                Ok(SubmitOutcome::Presented) => {
                     self.presentation.sink = Some(sink);
                     shared.flush_scheduled.store(false, Ordering::Release);
                     self.consecutive_present_failures = 0;
                     self.last_present = Some(Instant::now());
                     window::disarm_flush_timer();
+                    return Ok(());
+                }
+                Ok(SubmitOutcome::Busy) => {
+                    // The game still holds the primary lock; keep the frame dirty
+                    // and retry instead of dropping it.
+                    self.presentation.sink = Some(sink);
+                    shared.dirty.store(true, Ordering::Release);
+                    shared.flush_scheduled.store(false, Ordering::Release);
+                    window::arm_flush_timer(4);
                     return Ok(());
                 }
                 Err(err) => {

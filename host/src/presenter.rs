@@ -130,6 +130,35 @@ fn instance_descriptor(backend: &str) -> wgpu::InstanceDescriptor {
     }
 }
 
+fn debug_clear() -> Option<wgpu::Color> {
+    let value = std::env::var("CNC_DDRAW_HOST_CLEAR").ok()?;
+    let value = value.trim().to_ascii_lowercase();
+    let (r, g, b) = match value.as_str() {
+        "red" => (1.0, 0.0, 0.0),
+        "green" => (0.0, 1.0, 0.0),
+        "blue" => (0.0, 0.0, 1.0),
+        "white" => (1.0, 1.0, 1.0),
+        "magenta" => (1.0, 0.0, 1.0),
+        "cyan" => (0.0, 1.0, 1.0),
+        "yellow" => (1.0, 1.0, 0.0),
+        other => {
+            let hex = other.strip_prefix("0x").unwrap_or(other);
+            let rgb = u32::from_str_radix(hex, 16).ok()?;
+            (
+                ((rgb >> 16) & 0xff) as f32 / 255.0,
+                ((rgb >> 8) & 0xff) as f32 / 255.0,
+                (rgb & 0xff) as f32 / 255.0,
+            )
+        }
+    };
+    Some(wgpu::Color {
+        r: r as f64,
+        g: g as f64,
+        b: b as f64,
+        a: 1.0,
+    })
+}
+
 pub struct Presenter {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -140,6 +169,10 @@ pub struct Presenter {
     frame: Option<UploadedFrame>,
     staging: Vec<u8>,
     maintas: bool,
+    clear_color: wgpu::Color,
+    clear_only: bool,
+    logged_frame: bool,
+    logged_present: bool,
 }
 
 impl Presenter {
@@ -198,6 +231,10 @@ impl Presenter {
         // Wine DXGI has incomplete Mailbox/Immediate support. Fifo is the only
         // present mode we trust for D3DMetal and for pacing the 32-bit game.
         surface_cfg.present_mode = wgpu::PresentMode::Fifo;
+        // Force an opaque swapchain. If the overlay is treated as transparent by
+        // Wine/D3DMetal, the WindowServer can composite the desktop instead of
+        // the presented frame, which looks exactly like a black screen.
+        surface_cfg.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("DirectDraw GPU unpack and blit"),
@@ -225,6 +262,13 @@ impl Presenter {
             cache: None,
         });
 
+        let clear_color = debug_clear().unwrap_or(wgpu::Color::BLACK);
+        let clear_only = std::env::var_os("CNC_DDRAW_HOST_CLEAR").is_some();
+        logging::log_msg(&format!(
+            "presenter init: format={:?} clear_only={clear_only}",
+            surface_cfg.format
+        ));
+
         Ok(Self {
             surface,
             device,
@@ -235,6 +279,10 @@ impl Presenter {
             frame: None,
             staging: Vec::new(),
             maintas,
+            clear_color,
+            clear_only,
+            logged_frame: false,
+            logged_present: false,
         })
     }
 
@@ -255,6 +303,22 @@ impl Presenter {
             || u64::from(pitch) * u64::from(height) > u64::from(header.slot_bytes)
         {
             return Err("invalid frame pitch/length".to_string());
+        }
+
+        if !self.logged_frame {
+            self.logged_frame = true;
+            let total = pitch as usize * height as usize;
+            // SAFETY: The producer guarantees pitch * height bytes at `base`.
+            let sample = unsafe { std::slice::from_raw_parts(base, total) };
+            let nonzero = sample.iter().filter(|&&b| b != 0).count();
+            let head = &sample[..sample.len().min(32)];
+            let mid = &sample[(height as usize / 2) * pitch as usize..]
+                [..(pitch as usize).min(32)];
+            logging::log_msg(&format!(
+                "first frame: {width}x{height} pitch={pitch} format={format:?} lut_gen={} nonzero={nonzero}/{total} head={head:02x?} mid={mid:02x?} lut0={:?}",
+                header.lut_gen,
+                &header.lut[..4]
+            ));
         }
 
         let size = wgpu::Extent3d {
@@ -369,10 +433,17 @@ impl Presenter {
         };
         self.configured = !output.suboptimal;
 
-        let Some(frame) = self.frame.as_ref() else {
+        let frame = self.frame.as_ref();
+        if !self.clear_only && frame.is_none() {
             return Ok(());
-        };
-        let frame_size = frame.raw_texture.size();
+        }
+        if !self.logged_present {
+            self.logged_present = true;
+            logging::log_msg(&format!(
+                "first present: target={target_w}x{target_h} frame={:?}",
+                frame.map(|f| f.raw_texture.size())
+            ));
+        }
         let view = output.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
@@ -383,23 +454,26 @@ impl Presenter {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(self.clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
-            let (vx, vy, vw, vh) = compute_viewport(
-                frame_size.width,
-                frame_size.height,
-                target_w,
-                target_h,
-                self.maintas,
-            );
-            pass.set_viewport(vx as f32, vy as f32, vw as f32, vh as f32, 0.0, 1.0);
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &frame.bindings, &[]);
-            pass.draw(0..3, 0..1);
+            if let Some(frame) = frame {
+                let frame_size = frame.raw_texture.size();
+                let (vx, vy, vw, vh) = compute_viewport(
+                    frame_size.width,
+                    frame_size.height,
+                    target_w,
+                    target_h,
+                    self.maintas,
+                );
+                pass.set_viewport(vx as f32, vy as f32, vw as f32, vh as f32, 0.0, 1.0);
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &frame.bindings, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
         self.queue.submit([encoder.finish()]);
         output.present();
