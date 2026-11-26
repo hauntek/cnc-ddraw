@@ -93,7 +93,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "cnc-ddraw"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ddraw-protocol",
  "fearless_simd",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "ddraw-host"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ddraw-protocol",
  "pollster",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "ddraw-protocol"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "codespan-reporting"

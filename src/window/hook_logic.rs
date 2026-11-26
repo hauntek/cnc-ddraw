@@ -32,33 +32,53 @@ use super::{
     WM_APP_FLUSH,
 };
 
-pub(super) fn virtual_window_rect(hwnd: HWND, _include_dialogs: bool) -> Option<RECT> {
+pub(super) fn virtual_window_rect(hwnd: HWND, include_dialogs: bool) -> Option<RECT> {
     static CALLS: AtomicUsize = AtomicUsize::new(0);
     let (bound, w, h, _) = logical_mode()?;
-    if hwnd != bound && hwnd != desktop_window() {
-        // Dialogs and their controls are real windows laid out in real pixels: the game positions
-        // their real children from `GetWindowRect`, so handing it virtual pixels here would put
-        // its idea of the dialog in a different space than the controls it is talking to.
-        return None;
+    if hwnd == bound || hwnd == desktop_window() {
+        // Sample what the game believes its window size is: if it ever sees the
+        // real 1280x960 here, its own cursor-to-surface maths would scale a
+        // second time on top of the hook below.
+        if CALLS.fetch_add(1, Ordering::Relaxed) % 120 == 0 {
+            crate::compat::log_msg(&format!(
+                "clientrect: hwnd=0x{:x} returning {}x{} real={:?}",
+                hwnd.0 as usize,
+                w,
+                h,
+                window_rect(bound).ok().map(|r| (r.right - r.left, r.bottom - r.top))
+            ));
+        }
+        return Some(RECT {
+            left: 0,
+            top: 0,
+            right: w as i32,
+            bottom: h as i32,
+        });
     }
-    // Sample what the game believes its window size is: if it ever sees the
-    // real 1280x960 here, its own cursor-to-surface maths would scale a
-    // second time on top of the hook below.
-    if CALLS.fetch_add(1, Ordering::Relaxed) % 120 == 0 {
-        crate::compat::log_msg(&format!(
-            "clientrect: hwnd=0x{:x} returning {}x{} real={:?}",
-            hwnd.0 as usize,
-            w,
-            h,
-            window_rect(bound).ok().map(|r| (r.right - r.left, r.bottom - r.top))
-        ));
+    if include_dialogs && is_related_dialog_window(bound, hwnd) {
+        // The game's world is anchored at the game window's client origin, so shift a dialog's
+        // real screen rect into that space. Native `lParam` and `ScreenToClient` values already
+        // land there, which is what keeps the real child controls consistent with this.
+        return Some(map_rect(None, Some(bound), window_rect(hwnd).ok()?));
     }
-    Some(RECT {
-        left: 0,
-        top: 0,
-        right: w as i32,
-        bottom: h as i32,
-    })
+    None
+}
+
+/// Maps a `CB_GETDROPPEDCONTROLRECT` screen-space rectangle into the game window's virtual client
+/// space, matching `virtual_window_rect`, so dialog scalers that subtract `GetWindowRect(parent)`
+/// from `SendMessage(combo, CB_GETDROPPEDCONTROLRECT, ...)` do not shift ComboBoxes by the host
+/// window's desktop position in windowed mode.
+pub(super) fn map_dropped_control_rect(hwnd: HWND, rect: &mut RECT) {
+    let Some((bound, _, _, _)) = logical_mode() else {
+        return;
+    };
+    map_dropped_control_rect_for_bound(bound, hwnd, rect);
+}
+
+pub(super) fn map_dropped_control_rect_for_bound(bound: HWND, hwnd: HWND, rect: &mut RECT) {
+    if hwnd == bound || is_related_dialog_window(bound, hwnd) {
+        *rect = map_rect(None, Some(bound), *rect);
+    }
 }
 
 pub(super) fn virtual_system_metrics(index: i32) -> Option<i32> {
@@ -72,16 +92,28 @@ pub(super) fn virtual_system_metrics(index: i32) -> Option<i32> {
     None
 }
 
-pub(super) fn virtual_client_to_screen(hwnd: HWND, _pt: &mut POINT) -> Option<bool> {
+pub(super) fn virtual_client_to_screen(hwnd: HWND, pt: &mut POINT) -> Option<bool> {
     let (bound, _, _, _) = logical_mode()?;
-    // In the game's pretend world the window sits at the screen origin, so screen and client
-    // space coincide for it; everything else (real dialogs and their controls) stays real.
-    (hwnd == bound).then_some(true)
+    if hwnd == bound {
+        // In the game's pretend world the window sits at the screen origin, so screen and client
+        // space coincide for it.
+        return Some(true);
+    }
+    if is_related_dialog_window(bound, hwnd) {
+        return Some(client_to_screen(hwnd, pt) && screen_to_client(bound, pt));
+    }
+    None
 }
 
-pub(super) fn virtual_screen_to_client(hwnd: HWND, _pt: &mut POINT) -> Option<bool> {
+pub(super) fn virtual_screen_to_client(hwnd: HWND, pt: &mut POINT) -> Option<bool> {
     let (bound, _, _, _) = logical_mode()?;
-    (hwnd == bound).then_some(true)
+    if hwnd == bound {
+        return Some(true);
+    }
+    if is_related_dialog_window(bound, hwnd) {
+        return Some(client_to_screen(bound, pt) && screen_to_client(hwnd, pt));
+    }
+    None
 }
 
 pub(super) fn virtual_cursor_pos() -> Option<POINT> {
@@ -266,8 +298,10 @@ pub(super) fn rewrite_getmsg(msg: &mut MSG) {
         return;
     };
     if msg.hwnd != bound {
-        // Real dialogs and their controls live in real pixels; the window manager already routed
-        // this message by the real cursor position, so leave both target and coordinates alone.
+        // A real dialog or control owns this message. Its native `lParam` is already the position
+        // the game expects, because dialogs are reported in the same game-window-anchored space
+        // (`virtual_window_rect`) and the window manager already routed the message by the real
+        // cursor position. Rewriting it here would scale a dialog's coordinates twice.
         return;
     }
     let Some((lx, ly)) = virtual_message_pos() else {

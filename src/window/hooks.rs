@@ -14,9 +14,10 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CallWindowProcA, CallWindowProcW, CreateDialogIndirectParamA,
     CreateDialogParamA, DialogBoxIndirectParamA, DialogBoxParamA, GetClientRect, GetClipCursor,
-    GetMessagePos, GetWindowLongA, GetWindowLongW, GetWindowRect, SetWindowLongA, SetWindowLongW,
-    SetWindowsHookExW, UnhookWindowsHookEx, DLGPROC, DLGTEMPLATE, GWLP_WNDPROC, HHOOK, MSG,
-    RT_DIALOG, WH_GETMESSAGE, WM_WINDOWPOSCHANGED, WINDOWPOS, WNDPROC,
+    GetMessagePos, GetWindowLongA, GetWindowLongW, GetWindowRect, SendMessageA, SendMessageW,
+    SetWindowLongA, SetWindowLongW, SetWindowsHookExW, UnhookWindowsHookEx,
+    CB_GETDROPPEDCONTROLRECT, DLGPROC, DLGTEMPLATE, GWLP_WNDPROC, HHOOK, MSG, RT_DIALOG,
+    WH_GETMESSAGE, WM_WINDOWPOSCHANGED, WINDOWPOS, WNDPROC,
 };
 
 use crate::win32::geometry::is_window;
@@ -179,6 +180,40 @@ unsafe extern "system" fn hook_MoveWindow(
 
 unsafe extern "system" fn hook_GetDeviceCaps(hdc: HDC, index: i32) -> i32 {
     hook_logic::virtual_device_caps(index).unwrap_or_else(|| device_caps(hdc, index))
+}
+
+unsafe extern "system" fn hook_SendMessageA(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // SAFETY: Forwarding unchanged ABI arguments to Win32 SendMessageA.
+    let result = unsafe { SendMessageA(hwnd, msg, wparam, lparam) };
+    if result.0 != 0 && msg == CB_GETDROPPEDCONTROLRECT && lparam.0 != 0 {
+        // SAFETY: Per Win32 CB_GETDROPPEDCONTROLRECT, a non-zero return means `lparam` points to
+        // the caller's initialized writable RECT filled with screen coordinates.
+        let rect = unsafe { &mut *(lparam.0 as *mut RECT) };
+        hook_logic::map_dropped_control_rect(hwnd, rect);
+    }
+    result
+}
+
+unsafe extern "system" fn hook_SendMessageW(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // SAFETY: Forwarding unchanged ABI arguments to Win32 SendMessageW.
+    let result = unsafe { SendMessageW(hwnd, msg, Some(wparam), Some(lparam)) };
+    if result.0 != 0 && msg == CB_GETDROPPEDCONTROLRECT && lparam.0 != 0 {
+        // SAFETY: Per Win32 CB_GETDROPPEDCONTROLRECT, a non-zero return means `lparam` points to
+        // the caller's initialized writable RECT filled with screen coordinates.
+        let rect = unsafe { &mut *(lparam.0 as *mut RECT) };
+        hook_logic::map_dropped_control_rect(hwnd, rect);
+    }
+    result
 }
 
 // Win32 requires a DWORD-aligned template. The indirect caller may leave padding
@@ -612,6 +647,16 @@ pub(crate) fn install_iat_hooks() {
             hook_DialogBoxIndirectParamA as *const () as usize,
         ),
         (
+            "user32.dll",
+            "SendMessageA",
+            hook_SendMessageA as *const () as usize,
+        ),
+        (
+            "user32.dll",
+            "SendMessageW",
+            hook_SendMessageW as *const () as usize,
+        ),
+        (
             "gdi32.dll",
             "GetDeviceCaps",
             hook_GetDeviceCaps as *const () as usize,
@@ -629,8 +674,73 @@ pub(crate) fn uninstall_iat_hooks() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::win32::hwnd::destroy_window;
+    use crate::win32::geometry::{map_rect, window_rect};
+    use crate::win32::hwnd::{create_window_ex_w, destroy_window};
     use crate::window::dialog_template::tests::{build_ex_template, build_standard_template};
+    use windows::core::w;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WS_CHILD, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    };
+
+    #[test]
+    fn dropped_control_rect_cancels_host_window_offset() {
+        let host = create_window_ex_w(
+            Default::default(),
+            w!("STATIC"),
+            w!("host"),
+            WS_OVERLAPPEDWINDOW,
+            300,
+            200,
+            800,
+            600,
+            None,
+            None,
+        )
+        .unwrap();
+        let dialog = create_window_ex_w(
+            Default::default(),
+            w!("STATIC"),
+            w!("dialog"),
+            WS_POPUP,
+            360,
+            280,
+            400,
+            300,
+            Some(host),
+            None,
+        )
+        .unwrap();
+        let combo = create_window_ex_w(
+            Default::default(),
+            w!("ComboBox"),
+            w!(""),
+            WS_CHILD | WS_VISIBLE,
+            42,
+            27,
+            160,
+            120,
+            Some(dialog),
+            None,
+        )
+        .unwrap();
+        let mut combo_rc = RECT::default();
+        // SAFETY: `combo` is a valid ComboBox HWND and `combo_rc` is a writable RECT.
+        let res = unsafe {
+            SendMessageA(
+                combo,
+                CB_GETDROPPEDCONTROLRECT,
+                WPARAM(0),
+                LPARAM(&mut combo_rc as *mut RECT as isize),
+            )
+        };
+        assert_ne!(res.0, 0);
+        hook_logic::map_dropped_control_rect_for_bound(host, combo, &mut combo_rc);
+        let dlg_rc = map_rect(None, Some(host), window_rect(dialog).unwrap());
+        destroy_window(dialog);
+        destroy_window(host);
+        assert_eq!(combo_rc.left - dlg_rc.left, 42);
+        assert_eq!(combo_rc.top - dlg_rc.top, 27);
+    }
 
     #[test]
     fn copy_patched_template_writes_scaled_point_size() {
