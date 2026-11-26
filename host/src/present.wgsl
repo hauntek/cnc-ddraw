@@ -9,13 +9,15 @@ fn vs(@builtin(vertex_index) index: u32) -> Vertex {
     return Vertex(vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0), uv);
 }
 
+// No sampler here. A sampler binding makes naga's HLSL backend emit a
+// sampler-heap resource array, which D3DMetal's FXC rejects with
+// "Shader model 5.1+ resource array". The original renderer used
+// textureLoad for exactly this reason.
 @group(0) @binding(0) var raw_frame: texture_2d<f32>;
-@group(0) @binding(1) var frame_sampler: sampler;
 
 @fragment
 fn fs(input: Vertex) -> @location(0) vec4<f32> {
-    // Use a normal sampled texture instead of textureLoad. textureLoad on an
-    // UNORM texture is the one remaining D3D12/D3DMetal-specific difference
-    // between this host and a conventional sampled-texture game.
-    return textureSample(raw_frame, frame_sampler, input.uv);
+    let size = vec2<i32>(textureDimensions(raw_frame));
+    let pixel = clamp(vec2<i32>(input.uv * vec2<f32>(size)), vec2<i32>(0), size - vec2<i32>(1));
+    return textureLoad(raw_frame, pixel, 0);
 }
