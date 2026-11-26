@@ -547,18 +547,15 @@ impl IDirectDraw_Impl for Draw_Impl {
         if let Some(saved) = display.set_host(None) {
             saved.restore()?;
         }
-        if manage_window {
-            let cfg = config::get();
-            let initial_mode = if cfg.windowed {
-                PresentationMode::Windowed
-            } else {
-                PresentationMode::BorderlessFullscreen
-            };
-            let host = HostWindow::enter(hwnd, initial_mode, display.width, display.height, cfg)?;
-            display.set_host(Some(host));
-        }
         self.exclusive.store(exclusive, Ordering::Release);
         self.manage_window.store(manage_window, Ordering::Release);
+        // Bind *before* the host block resizes the window. That resize sends `WM_SIZE` /
+        // `WM_WINDOWPOSCHANGED` (and makes `GetClientRect` report the real size), and an engine
+        // that observes the monitor-sized client area once caches it and rescales every mouse
+        // position by the ratio to the primary surface - clicks then miss everywhere in
+        // fullscreen while windowed mode, where the sizes nearly match, still works. Only the
+        // subclass installed here (with the provisional logical size recorded by `bind_window`)
+        // can keep the real geometry away from the game.
         if change_hwnd {
             display.presentation.bound_hwnd = make_hwnd(hwnd);
             // Renderer and 64-bit host are created lazily on the first present.
@@ -581,7 +578,20 @@ impl IDirectDraw_Impl for Draw_Impl {
                 set_active_display(&self.display);
             }
         } else {
+            // Same window, possibly a new cooperative level: the previous host was restored
+            // above, so its current client area is again the size the game believes in.
+            window::refresh_bound_client(hwnd);
             window::set_scaling_active(self.bind_id.load(Ordering::Acquire), exclusive);
+        }
+        if manage_window {
+            let cfg = config::get();
+            let initial_mode = if cfg.windowed {
+                PresentationMode::Windowed
+            } else {
+                PresentationMode::BorderlessFullscreen
+            };
+            let host = HostWindow::enter(hwnd, initial_mode, display.width, display.height, cfg)?;
+            display.set_host(Some(host));
         }
         let _ = self.display.present_locked(display);
         Ok(())

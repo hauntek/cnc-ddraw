@@ -70,11 +70,21 @@ jobs:
           ls -lh target/i686-pc-windows-gnullvm/release/ddraw.dll \
             target/x86_64-pc-windows-gnullvm/release/ddraw-host.exe
 
+      - name: Stage flat release files
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          cp target/i686-pc-windows-gnullvm/release/ddraw.dll dist/
+          cp target/x86_64-pc-windows-gnullvm/release/ddraw-host.exe dist/
+          ls -lh dist
+
       - name: Upload DLL and host artifacts
         uses: actions/upload-artifact@v4
         with:
           name: cnc-ddraw
           if-no-files-found: error
-          path: |
-            target/i686-pc-windows-gnullvm/release/ddraw.dll
-            target/x86_64-pc-windows-gnullvm/release/ddraw-host.exe
+          # `dist/*` (rather than the target/... paths) keeps the artifact zip
+          # flat: ddraw.dll and ddraw-host.exe at the root, ready to drop next
+          # to the game executable after unzipping.
+          path: dist/*

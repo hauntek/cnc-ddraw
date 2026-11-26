@@ -126,7 +126,7 @@ impl HostWindow {
             GWL_EXSTYLE,
             (self.orig_ex_style as u32 & !edge_styles) as i32,
         )?;
-        set_window_pos(
+        let applied = set_window_pos(
             hwnd,
             None,
             rect.left,
@@ -134,7 +134,21 @@ impl HostWindow {
             rect.right - rect.left,
             rect.bottom - rect.top,
             SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE,
-        )
+        );
+        // Say what actually happened: a fullscreen window that does not cover the monitor is
+        // either a failed `SetWindowPos` or a monitor whose work area the game then clipped.
+        crate::compat::log_msg(&format!(
+            "fullscreen: ok={} monitor=({},{}) {}x{} client={:?}",
+            applied.is_ok(),
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            crate::win32::geometry::client_rect(hwnd)
+                .ok()
+                .map(|c| (c.right - c.left, c.bottom - c.top))
+        ));
+        applied
     }
 
     fn apply_windowed(&mut self, logical_w: u32, logical_h: u32, cfg: &Config) -> Result<()> {

@@ -30,8 +30,9 @@ height = 0
 ; posy = 0
 
 ; --- scaling -----------------------------------------------------------------
-; Keep the 4:3 aspect ratio and add pillarbox bars: 800x600 -> 1440x1080
-; centred in a 1920x1080 window. Set to no to stretch instead.
+; Never upscale: keep each frame at its native pixel grid and centre it in the
+; fullscreen window (800x600 -> 800x600 in the middle of 1920x1080). Set to no
+; to stretch instead. A window smaller than the frame is scaled down to fit.
 maintas = yes
 
 ; --- pacing ------------------------------------------------------------------

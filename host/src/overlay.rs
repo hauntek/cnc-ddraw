@@ -7,7 +7,7 @@
 //! takes the click instead, rescales it to the game's frame size and posts it to
 //! the game window - the same approach the original in-process renderer used.
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -33,9 +33,18 @@ static INPUT_TARGET: AtomicUsize = AtomicUsize::new(0);
 /// overlay client pixels back into the game's own coordinate space.
 static FRAME_SIZE: AtomicU32 = AtomicU32::new(0);
 
+/// Whether the presenter letterboxes the frame (`maintas`) instead of stretching it.
+/// Forwarded clicks must use the same viewport the picture is drawn into.
+static MAINTAS: AtomicBool = AtomicBool::new(false);
+
 /// Register the window that should receive forwarded mouse input.
 pub fn set_input_target(game: HWND) {
     INPUT_TARGET.store(game.0 as usize, Ordering::Relaxed);
+}
+
+/// Tell the overlay whether the presenter keeps the frame's aspect ratio.
+pub fn set_maintas(enabled: bool) {
+    MAINTAS.store(enabled, Ordering::Relaxed);
 }
 
 /// Tell the overlay how large the game's frame is, so forwarded clicks carry
@@ -48,6 +57,62 @@ fn frame_size() -> Option<(u32, u32)> {
     let packed = FRAME_SIZE.load(Ordering::Relaxed);
     let (width, height) = (packed >> 16, packed & 0xffff);
     (width > 0 && height > 0).then_some((width, height))
+}
+
+/// Pixel rectangle the frame occupies inside the overlay's client area.
+///
+/// This mirrors `presenter::compute_viewport`: a frame that fits is kept 1:1 and centred, so the
+/// click at overlay pixel `(vx, vy)` is frame pixel `(0, 0)` with no scale factor in between. Only
+/// a window smaller than the frame is downscaled with the aspect ratio kept. Forwarding the raw
+/// client area instead made every click in fullscreen land to the right of where the player aimed.
+fn viewport(
+    frame_w: u32,
+    frame_h: u32,
+    client_w: u32,
+    client_h: u32,
+    maintas: bool,
+) -> (i64, i64, i64, i64) {
+    if !maintas || frame_w == 0 || frame_h == 0 || client_w == 0 || client_h == 0 {
+        return (0, 0, i64::from(client_w.max(1)), i64::from(client_h.max(1)));
+    }
+    if client_w >= frame_w && client_h >= frame_h {
+        return (
+            ((client_w - frame_w) / 2) as i64,
+            ((client_h - frame_h) / 2) as i64,
+            i64::from(frame_w),
+            i64::from(frame_h),
+        );
+    }
+    let w = (client_h as u64 * frame_w as u64 / frame_h as u64).clamp(1, client_w as u64);
+    let h = (client_w as u64 * frame_h as u64 / frame_w as u64).clamp(1, client_h as u64);
+    (
+        ((client_w as u64 - w) / 2) as i64,
+        ((client_h as u64 - h) / 2) as i64,
+        w as i64,
+        h as i64,
+    )
+}
+
+/// Convert an overlay client pixel to the game's frame pixel, through the presenter's viewport.
+///
+/// Clicks in the letterbox bars clamp to the nearest frame edge, so they cannot produce negative
+/// or out-of-range coordinates.
+fn frame_point(
+    px: i32,
+    py: i32,
+    client_w: u32,
+    client_h: u32,
+    frame_w: u32,
+    frame_h: u32,
+    maintas: bool,
+) -> (i32, i32) {
+    let (vx, vy, vw, vh) = viewport(frame_w, frame_h, client_w, client_h, maintas);
+    let rx = (i64::from(px) - vx).clamp(0, vw - 1);
+    let ry = (i64::from(py) - vy).clamp(0, vh - 1);
+    (
+        (rx * i64::from(frame_w) / vw) as i32,
+        (ry * i64::from(frame_h) / vh) as i32,
+    )
 }
 
 fn is_mouse_input(msg: u32) -> bool {
@@ -96,12 +161,17 @@ unsafe extern "system" fn overlay_wndproc(
                 // SAFETY: `hwnd` is the live overlay window owned by this process.
                 let mut client = RECT::default();
                 let _ = unsafe { GetClientRect(hwnd, &mut client) };
-                let client_w = (client.right - client.left).max(1) as i64;
-                let client_h = (client.bottom - client.top).max(1) as i64;
+                let client_w = (client.right - client.left).max(1) as u32;
+                let client_h = (client.bottom - client.top).max(1) as u32;
                 let (lx, ly) = match frame_size() {
-                    Some((frame_w, frame_h)) => (
-                        (i64::from(px) * i64::from(frame_w) / client_w) as i32,
-                        (i64::from(py) * i64::from(frame_h) / client_h) as i32,
+                    Some((frame_w, frame_h)) => frame_point(
+                        px,
+                        py,
+                        client_w,
+                        client_h,
+                        frame_w,
+                        frame_h,
+                        MAINTAS.load(Ordering::Relaxed),
                     ),
                     None => (px, py),
                 };
@@ -323,5 +393,46 @@ pub fn client_screen_rect(game: HWND) -> Option<(i32, i32, i32, i32)> {
             return None;
         }
         Some((origin.x, origin.y, rect.right, rect.bottom))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frame_point;
+
+    #[test]
+    fn forwarded_click_follows_the_native_centred_viewport() {
+        // An 800x600 frame in a 1920x1080 client stays 1:1 and is centred at (560, 240).
+        assert_eq!(frame_point(560, 240, 1920, 1080, 800, 600, true), (0, 0));
+        assert_eq!(
+            frame_point(1359, 839, 1920, 1080, 800, 600, true),
+            (799, 599)
+        );
+        assert_eq!(
+            frame_point(959, 539, 1920, 1080, 800, 600, true),
+            (399, 299)
+        );
+        // Clicks in the black bars clamp to the frame edge instead of going out of range.
+        assert_eq!(frame_point(0, 540, 1920, 1080, 800, 600, true), (0, 300));
+        assert_eq!(
+            frame_point(1919, 540, 1920, 1080, 800, 600, true),
+            (799, 300)
+        );
+        // Without `maintas` the whole client area is stretched onto the frame.
+        assert_eq!(frame_point(0, 0, 1920, 1080, 800, 600, false), (0, 0));
+        assert_eq!(
+            frame_point(1919, 1079, 1920, 1080, 800, 600, false),
+            (799, 599)
+        );
+    }
+
+    #[test]
+    fn forwarded_click_matches_the_presenter_when_the_window_is_upscaled() {
+        // A 1920x1080 frame in a slightly smaller 1863x1022 window: 1816x1022 at x=23.
+        assert_eq!(frame_point(23, 0, 1863, 1022, 1920, 1080, true), (0, 0));
+        assert_eq!(
+            frame_point(931, 511, 1863, 1022, 1920, 1080, true),
+            (960, 539)
+        );
     }
 }

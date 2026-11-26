@@ -332,6 +332,8 @@ fn run() -> Result<(), String> {
     // routed the click to the topmost window instead of the game below it) is
     // forwarded to the game window.
     crate::overlay::set_input_target(game);
+    // Forwarded clicks use the same letterboxed viewport the presenter draws into.
+    crate::overlay::set_maintas(args.maintas);
 
     // The swapchain must live in the process that owns the window: D3DMetal
     // attaches its Metal layer to the HWND's NSView, which belongs to whichever

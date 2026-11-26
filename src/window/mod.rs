@@ -33,6 +33,8 @@ static BOUND_THREAD: AtomicU32 = AtomicU32::new(0);
 static LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(0);
 static LOGICAL_HEIGHT: AtomicU32 = AtomicU32::new(0);
 static LOGICAL_BPP: AtomicU32 = AtomicU32::new(0);
+/// Client size the game believed in when the window was bound (`(width << 16) | height`).
+static BOUND_CLIENT: AtomicU32 = AtomicU32::new(0);
 static MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LOGICAL_SCALING_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -42,6 +44,14 @@ pub fn enable_dpi_awareness() {
 
 /// Computes the presentation viewport inside a `target_w x target_h` client area.
 /// Shared by both `wgpu` rendering and mouse input mapping so clicks always align pixel-for-pixel.
+///
+/// A frame that already fits at its native size is centred **unscaled**. Upscaling an 800x600
+/// frame to a 1920x1080 window (even uniformly, as a 1440x1080 letterbox) makes the displayed
+/// pixel grid differ from the game's own coordinate space, and every consumer - the presenter,
+/// `GetCursorPos`, the message `lParam`, the tooltip and dialog hit-testing - must apply exactly
+/// the same viewport or the pointer drifts by the scale factor. Keeping the frame at 1:1 removes
+/// that class of misalignment entirely: the offset is the only transform. The letterboxed
+/// downscale is retained only when the window is smaller than the frame (the windowed presenter).
 pub fn compute_viewport(
     width: u32,
     height: u32,
@@ -52,19 +62,43 @@ pub fn compute_viewport(
     if !maintas || width == 0 || height == 0 || target_w == 0 || target_h == 0 {
         return (0, 0, target_w.max(1), target_h.max(1));
     }
+    if target_w >= width && target_h >= height {
+        return (
+            (target_w - width) / 2,
+            (target_h - height) / 2,
+            width,
+            height,
+        );
+    }
     let w = (target_h as u64 * width as u64 / height as u64).clamp(1, target_w as u64) as u32;
     let h = (target_w as u64 * height as u64 / width as u64).clamp(1, target_h as u64) as u32;
     ((target_w - w) / 2, (target_h - h) / 2, w, h)
 }
 
 pub(crate) fn logical_mode() -> Option<(HWND, u32, u32, u32)> {
-    if !LOGICAL_SCALING_ACTIVE.load(Ordering::Relaxed) || !MODE_ACTIVE.load(Ordering::Relaxed) {
+    if !LOGICAL_SCALING_ACTIVE.load(Ordering::Relaxed) {
         return None;
     }
     let hwnd = BOUND_HWND.load()?;
-    let w = LOGICAL_WIDTH.load(Ordering::Relaxed);
-    let h = LOGICAL_HEIGHT.load(Ordering::Relaxed);
     let bpp = LOGICAL_BPP.load(Ordering::Relaxed);
+    // Until the game declares a display mode there is no surface size to virtualize to, but the
+    // game still has a belief: the client rect it saw when it created the window, before this DLL
+    // resized it. Using that as the provisional logical size keeps the whole hook layer consistent
+    // from the first message onwards. Without it the game is shown the real client size once, by
+    // the very `SetWindowPos` that takes the window borderless-fullscreen - and an engine that
+    // caches the size from that message (or from a `GetClientRect` call made inside its own
+    // `WM_SIZE` handler) then rescales every mouse position by the ratio between the real window
+    // and the surface, which makes every menu click miss in fullscreen while windowed mode, where
+    // the two sizes are close, still works.
+    let (w, h) = if MODE_ACTIVE.load(Ordering::Relaxed) {
+        (
+            LOGICAL_WIDTH.load(Ordering::Relaxed),
+            LOGICAL_HEIGHT.load(Ordering::Relaxed),
+        )
+    } else {
+        let packed = BOUND_CLIENT.load(Ordering::Relaxed);
+        ((packed >> 16) & 0xffff, packed & 0xffff)
+    };
     if w == 0 || h == 0 {
         return None;
     }
@@ -116,10 +150,39 @@ pub fn bind_window(hwnd: HWND, scaling_active: bool) -> usize {
     BOUND_THREAD.store(tid, Ordering::Relaxed);
     LOGICAL_SCALING_ACTIVE.store(scaling_active, Ordering::Relaxed);
     MODE_ACTIVE.store(false, Ordering::Relaxed);
+    refresh_bound_client(hwnd);
+    let (client_w, client_h) = bound_client_size();
+    crate::compat::log_msg(&format!(
+        "bind: hwnd=0x{:x} client={}x{} scaling={}",
+        hwnd.0 as usize, client_w, client_h, scaling_active
+    ));
     hooks::install_iat_hooks();
     hooks::install_subclass(hwnd);
     hooks::install_getmsg_hook(tid);
     id
+}
+
+/// Re-records the client size the game believes in, before the window is resized again.
+///
+/// `bind_window` records it, but a game can call `SetCooperativeLevel` again for the same window
+/// (for example when switching between windowed and fullscreen). The window has been restored to
+/// its original placement by then, so its current client area is again the size the game expects.
+pub(crate) fn refresh_bound_client(hwnd: HWND) {
+    if hwnd.is_invalid() {
+        return;
+    }
+    let client = client_rect(hwnd)
+        .map(|rc| (rc.right.max(0) as u32, rc.bottom.max(0) as u32))
+        .unwrap_or_default();
+    BOUND_CLIENT.store(
+        ((client.0.min(0xffff)) << 16) | client.1.min(0xffff),
+        Ordering::Relaxed,
+    );
+}
+
+fn bound_client_size() -> (u32, u32) {
+    let packed = BOUND_CLIENT.load(Ordering::Relaxed);
+    (packed >> 16, packed & 0xffff)
 }
 
 pub fn set_mode(width: u32, height: u32, bpp: u32, active: bool) {
@@ -230,11 +293,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn viewport_aspect_ratio_and_stretch() {
+    fn viewport_centres_native_frames_and_only_scales_down() {
+        // A frame that fits keeps its own pixel grid and is only centred.
+        assert_eq!(
+            compute_viewport(800, 600, 1920, 1080, true),
+            (560, 240, 800, 600)
+        );
         assert_eq!(
             compute_viewport(640, 480, 1920, 1080, true),
-            (240, 0, 1440, 1080)
+            (640, 300, 640, 480)
         );
+        // A window smaller than the frame is downscaled with the aspect ratio kept.
+        assert_eq!(
+            compute_viewport(1920, 1080, 1863, 1022, true),
+            (23, 0, 1816, 1022)
+        );
+        // `maintas = no` still stretches to the whole target.
         assert_eq!(
             compute_viewport(640, 480, 1920, 1080, false),
             (0, 0, 1920, 1080)

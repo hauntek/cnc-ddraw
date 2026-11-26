@@ -105,7 +105,7 @@ width=0                  ; windowed client width (0 = follow game logical resolu
 height=0                 ; windowed client height (0 = follow game logical resolution)
 posX=-32000              ; windowed X position (-32000 = center on monitor)
 posY=-32000              ; windowed Y position (-32000 = center on monitor)
-maintas=true             ; preserve aspect ratio (false = stretch to fill window)
+maintas=true             ; never upscale: frame is 1:1 centred when it fits (false = stretch)
 vsync=false              ; true = Fifo vsync, false = low-latency Mailbox/Immediate
 maxfps=0                 ; 0 = coalesced ~250 Hz cap, >0 = explicit FPS cap
 renderer=auto            ; auto, dx12, or vulkan (host backend; WGPU_BACKEND wins)
@@ -155,7 +155,7 @@ windowed mode.
   packed RGBA8 using the palette LUT.
 
   The **default** present path is a CPU blit: the host nearest-neighbour
-  upscales that RGBA8 frame to the letterboxed viewport, writes it into a
+  maps that RGBA8 frame into the viewport, writes it into a
   `Bgra8Unorm` texture and `copy_texture_to_texture`s it into the swapchain
   image. It uses no render pipeline, shader, bind group or sampler, because on
   wgpu 27 / DX12 / D3DMetal a draw through a pipeline that declares a bind
@@ -202,7 +202,7 @@ path, which is the default - `CNC_DDRAW_HOST_BLIT=1` disables them):
 
 | Variable | Effect |
 | --- | --- |
-| `CNC_DDRAW_HOST_BLIT=1` | Use the CPU nearest-neighbour upscale plus `copy_texture_to_texture` instead of the render pipeline |
+| `CNC_DDRAW_HOST_BLIT=1` | Use the CPU nearest-neighbour scale plus `copy_texture_to_texture` instead of the render pipeline |
 | `CNC_DDRAW_HOST_RGBA=1` | Fallback: convert the frame to RGBA8 on the CPU and upload that, instead of letting the shader unpack the raw surface |
 | `CNC_DDRAW_HOST_CLEAR=red\|green\|blue\|white\|magenta\|0xRRGGBB` | Clear the swapchain and skip drawing |
 | `CNC_DDRAW_HOST_SOLID_DRAW=1` | GPU path: draw a fullscreen red triangle with no bindings |
@@ -221,10 +221,12 @@ from "draw/sample path broken".
 
 ### Coordinate space when the window is scaled
 
-The primary surface stays at the game's own resolution (for example 800x600)
-and the GPU upscales it, so at any other window size the game must never learn
-the real client size. Everything it can observe is virtualized to the surface
-size, and mixing the two spaces is what makes clicks land in the wrong place:
+The primary surface stays at the game's own resolution (for example 800x600).
+A frame that fits is presented 1:1 in the centre of the window and is only
+downscaled when the window is smaller, so at any other window size the game
+must never learn the real client size. Everything it can observe is virtualized
+to the surface size, and mixing the two spaces is what makes clicks land in the
+wrong place:
 
 - `GetClientRect`/`GetWindowRect`, `ScreenToClient`/`ClientToScreen`,
   `GetCursorPos`/`SetCursorPos`, `ClipCursor`/`GetClipCursor`, `GetMessagePos`,
@@ -346,8 +348,9 @@ COM class factories.
   texel. A present is only submitted when a new frame arrived or the overlay
   moved/resized, so the host does not redraw the same picture at the display
   refresh rate. `CNC_DDRAW_HOST_BLIT=1` switches to a CPU nearest-neighbour
-  upscale plus `copy_texture_to_texture`, which needs no pipeline and exists as a
+  scale plus `copy_texture_to_texture`, which needs no pipeline and exists as a
   fallback for stacks where the pipeline path fails.
-- Frame output is nearest-neighbour scaled (the shader indexes exact texels), so
-  non-integer scale factors (e.g. 800x600 to 1440x1080) show slightly hard pixel
-  edges.
+- A frame smaller than the window is not upscaled: it keeps its native pixel
+grid and is centred (black bars around it), which is what keeps the pointer and
+the presented pixels in the same coordinate space. Only a window smaller than
+the frame is nearest-neighbour downscaled.

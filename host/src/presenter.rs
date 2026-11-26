@@ -1147,6 +1147,17 @@ fn compute_viewport(
     if !maintas || width == 0 || height == 0 || target_w == 0 || target_h == 0 {
         return (0, 0, target_w.max(1), target_h.max(1));
     }
+    // A frame that fits at its native size stays 1:1 and is only centred. This is
+    // the same rule as the 32-bit `window::compute_viewport`; both sides must agree
+    // or a forwarded click lands at a different pixel than the one on screen.
+    if target_w >= width && target_h >= height {
+        return (
+            (target_w - width) / 2,
+            (target_h - height) / 2,
+            width,
+            height,
+        );
+    }
     let w = (target_h as u64 * width as u64 / height as u64).clamp(1, target_w as u64) as u32;
     let h = (target_w as u64 * height as u64 / width as u64).clamp(1, target_h as u64) as u32;
     ((target_w - w) / 2, (target_h - h) / 2, w, h)
