@@ -15,14 +15,14 @@ use std::ffi::c_void;
 use std::sync::atomic::Ordering;
 
 use windows::Win32::Foundation::{CloseHandle, HWND, POINT, RECT, WAIT_OBJECT_0};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_SYNCHRONIZE, SetEvent, WaitForSingleObject,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, IsWindowEnabled, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    ClientToScreen, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
-    GetWindowRect, GetWindowThreadProcessId, IsWindow, IsWindowVisible, WindowFromPoint,
-    GUITHREADINFO,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowRect,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, WindowFromPoint, GUITHREADINFO,
 };
 
 use ddraw_protocol as protocol;
