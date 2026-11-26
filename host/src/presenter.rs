@@ -16,10 +16,6 @@ use protocol::{FrameFormat, Header};
 
 use crate::logging;
 
-fn align_up(value: u32, alignment: u32) -> u32 {
-    (value + alignment - 1) & !(alignment - 1)
-}
-
 fn debug_clear() -> Option<wgpu::Color> {
     let value = std::env::var("CNC_DDRAW_HOST_CLEAR").ok()?;
     let value = value.trim().to_ascii_lowercase();
@@ -60,7 +56,6 @@ impl UploadedFrame {
         pipeline: &wgpu::RenderPipeline,
         target_format: wgpu::TextureFormat,
         size: wgpu::Extent3d,
-        viewport_buffer: &wgpu::Buffer,
     ) -> Self {
         // Deliberately UNORM: D3DMetal's sRGB texture path is one of the
         // suspects for the black output. This may look slightly bright on an
@@ -82,16 +77,10 @@ impl UploadedFrame {
         let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("DirectDraw frame bindings"),
             layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: viewport_buffer.as_entire_binding(),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&raw_view),
+            }],
         });
         Self {
             raw_texture,
@@ -122,7 +111,6 @@ pub struct Presenter {
     configured: bool,
     pipeline: wgpu::RenderPipeline,
     solid_pipeline: wgpu::RenderPipeline,
-    viewport_buffer: wgpu::Buffer,
     frame: Option<UploadedFrame>,
     staging: Vec<u8>,
     maintas: bool,
@@ -247,13 +235,6 @@ impl Presenter {
             cache: None,
         });
 
-        let viewport_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("DirectDraw viewport uniform"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let clear_color = debug_clear().unwrap_or(wgpu::Color::BLACK);
         let clear_only = std::env::var_os("CNC_DDRAW_HOST_CLEAR").is_some();
         let solid = std::env::var_os("CNC_DDRAW_HOST_SOLID").is_some();
@@ -272,7 +253,6 @@ impl Presenter {
             configured: false,
             pipeline,
             solid_pipeline,
-            viewport_buffer,
             frame: None,
             staging: Vec::new(),
             maintas,
@@ -356,14 +336,16 @@ impl Presenter {
                 &self.pipeline,
                 self.config.format,
                 size,
-                &self.viewport_buffer,
             )
         });
 
-        let out_pitch = align_up(
-            width.checked_mul(4).ok_or_else(|| "rgba pitch overflow".to_string())?,
-            wgpu::COPY_BYTES_PER_ROW_ALIGNMENT,
-        ) as usize;
+        // Match the original in-process renderer: queue.write_texture accepts
+        // a tightly packed row stride (the original passes the DirectDraw pitch
+        // directly, e.g. 1600 for an 800-pixel RGB565 surface). Do not invent a
+        // 256-byte-aligned stride here; keep the upload byte-for-byte simple.
+        let out_pitch = width
+            .checked_mul(4)
+            .ok_or_else(|| "rgba pitch overflow".to_string())? as usize;
         let needed = out_pitch
             .checked_mul(height as usize)
             .ok_or_else(|| "rgba staging size overflow".to_string())?;
@@ -430,7 +412,6 @@ impl Presenter {
                     }
                 }
             }
-            dst[width as usize * 4..].fill(0);
         }
 
         self.queue.write_texture(
@@ -517,20 +498,7 @@ impl Presenter {
             } else {
                 (0, 0, target_w.max(1), target_h.max(1))
             };
-            let uniform = [
-                vx as f32,
-                vy as f32,
-                1.0 / vw.max(1) as f32,
-                1.0 / vh.max(1) as f32,
-            ];
-            let mut uniform_bytes = [0u8; 16];
-            for (i, value) in uniform.iter().enumerate() {
-                uniform_bytes[i * 4..i * 4 + 4].copy_from_slice(&value.to_ne_bytes());
-            }
-            self.queue
-                .write_buffer(&self.viewport_buffer, 0, &uniform_bytes);
             pass.set_viewport(vx as f32, vy as f32, vw as f32, vh as f32, 0.0, 1.0);
-            pass.set_scissor_rect(vx, vy, vw, vh);
             if self.solid_draw {
                 pass.set_pipeline(&self.solid_pipeline);
                 pass.draw(0..3, 0..1);
