@@ -37,15 +37,17 @@ use presenter::Presenter;
 /// Describes a window well enough to tell apart "the game", "our overlay" and
 /// "something else that is sitting on top of the game".
 fn window_label(hwnd: HWND) -> String {
-    // SAFETY: both calls only read the handle; `GetClassNameW` writes at most
-    // `class.len()` UTF-16 units into our buffer.
+    // SAFETY: every call here only reads the handle. `GetClassNameW` writes at
+    // most `class.len()` UTF-16 units into our own buffer and reports the count,
+    // which is clamped before slicing.
     unsafe {
         let mut class = [0u16; 64];
         let len = GetClassNameW(hwnd, &mut class).max(0) as usize;
         let class = String::from_utf16_lossy(&class[..len.min(class.len())]);
         let mut pid = 0u32;
         let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        let parent = GetParent(hwnd);
+        // A top-level window has no parent, so an error here is expected.
+        let parent = GetParent(hwnd).unwrap_or_default();
         let own = GetCurrentProcessId();
         format!(
             "class=\"{class}\" pid={pid}{} parent=0x{:x}",
