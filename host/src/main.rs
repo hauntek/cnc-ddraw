@@ -277,8 +277,8 @@ fn run() -> Result<(), String> {
     let args = parse_args()?;
     logging::init();
     logging::log_msg(&format!(
-        "starting: base={} hwnd=0x{:x} pid={} backend={} maintas={}",
-        args.base, args.hwnd, args.pid, args.backend, args.maintas
+        "starting: base={} hwnd=0x{:x} pid={} backend={} maintas={} vsync={}",
+        args.base, args.hwnd, args.pid, args.backend, args.maintas, args.vsync
     ));
 
     let source = ipc::FrameSource::open(&args.base)?;
