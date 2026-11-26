@@ -149,7 +149,6 @@ pub struct Presenter {
     configured: bool,
     frame_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
-    uv_pipeline: wgpu::RenderPipeline,
     const_pipeline: wgpu::RenderPipeline,
     /// `fs_const` driven through an empty pipeline layout (no bind group at all).
     const_nobind_pipeline: wgpu::RenderPipeline,
@@ -172,7 +171,6 @@ pub struct Presenter {
     clear_only: bool,
     solid: bool,
     solid_draw: bool,
-    position_uv: bool,
     const_fs: bool,
     const_nobind: bool,
     full_viewport: bool,
@@ -292,7 +290,6 @@ impl Presenter {
             })
         };
         let pipeline = make_pipeline("DirectDraw presentation", "fs");
-        let uv_pipeline = make_pipeline("DirectDraw uv diagnostic", "fs_uv");
         let const_pipeline = make_pipeline("DirectDraw const diagnostic", "fs_const");
         let const_nobind_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -350,7 +347,6 @@ impl Presenter {
         let clear_only = std::env::var_os("CNC_DDRAW_HOST_CLEAR").is_some();
         let solid = std::env::var_os("CNC_DDRAW_HOST_SOLID").is_some();
         let solid_draw = std::env::var_os("CNC_DDRAW_HOST_SOLID_DRAW").is_some();
-        let position_uv = std::env::var_os("CNC_DDRAW_HOST_POSITION_UV").is_some();
         let const_fs = std::env::var_os("CNC_DDRAW_HOST_CONST_FS").is_some();
         let const_nobind = std::env::var_os("CNC_DDRAW_HOST_CONST_NOBIND").is_some();
         let full_viewport = std::env::var_os("CNC_DDRAW_HOST_FULL_VIEWPORT").is_some();
@@ -361,7 +357,7 @@ impl Presenter {
         // works.
         let blit = std::env::var_os("CNC_DDRAW_HOST_GPU").is_none();
         logging::log_msg(&format!(
-            "presenter init: format={:?} blit={blit} clear_only={clear_only} solid={solid} solid_draw={solid_draw} position_uv={position_uv} const_fs={const_fs} const_nobind={const_nobind} full_viewport={full_viewport}",
+            "presenter init: format={:?} blit={blit} clear_only={clear_only} solid={solid} solid_draw={solid_draw} const_fs={const_fs} const_nobind={const_nobind} full_viewport={full_viewport}",
             surface_cfg.format
         ));
 
@@ -373,7 +369,6 @@ impl Presenter {
             configured: false,
             frame_layout,
             pipeline,
-            uv_pipeline,
             const_pipeline,
             const_nobind_pipeline,
             solid_pipeline,
@@ -390,7 +385,6 @@ impl Presenter {
             clear_only,
             solid,
             solid_draw,
-            position_uv,
             const_fs,
             const_nobind,
             full_viewport,
@@ -674,8 +668,6 @@ impl Presenter {
             } else if let Some(frame) = frame {
                 let selected = if self.const_fs {
                     &self.const_pipeline
-                } else if self.position_uv {
-                    &self.uv_pipeline
                 } else {
                     &self.pipeline
                 };

@@ -171,6 +171,13 @@ windowed mode.
   sampler binding: naga's HLSL backend turns a sampler into a sampler-heap
   resource array that D3DMetal's FXC rejects with `E5017`.
 
+  The vertex stage must return `@builtin(position)` directly. A version that
+  returned a struct with a `@location(0)` varying produced a draw that D3DMetal
+  silently dropped: it rendered nothing even with an empty pipeline layout, no
+  bind group and a constant-colour fragment shader, while `solid.wgsl` - same
+  vertex math, no varying - drew normally. wgpu reported no validation error
+  either way, so the rejection happens in the Metal translation, not in wgpu.
+
 Host-only presentation diagnostics (set in the environment of
 `ddraw-host.exe`, all off by default; the drawing ones need
 `CNC_DDRAW_HOST_GPU=1`):
@@ -183,7 +190,6 @@ Host-only presentation diagnostics (set in the environment of
 | `CNC_DDRAW_HOST_SOLID=1` | Upload an all-red RGBA frame instead of the game frame |
 | `CNC_DDRAW_HOST_CONST_FS=1` | GPU path: frame pipeline, but a constant green fragment shader |
 | `CNC_DDRAW_HOST_CONST_NOBIND=1` | GPU path: same vertex shader and constant green fragment, but an **empty** pipeline layout and no bind group |
-| `CNC_DDRAW_HOST_POSITION_UV=1` | GPU path: sample from the interpolated vertex UV |
 | `CNC_DDRAW_HOST_FULL_VIEWPORT=1` | Stretch the frame over the whole target |
 | `CNC_DDRAW_HOST_TIMING=1` | Log `timing: ...` every 2 s with loop/upload/present rates and average CPU cost |
 | `CNC_DDRAW_HOST_INPUT_BRIDGE=1` | Poll the real mouse and post synthetic button messages to the game window |

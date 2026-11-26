@@ -1,6 +1,6 @@
 // Presentation shader for the 64-bit host.
 //
-// Two hard constraints learned from the D3DMetal/FXC path:
+// Hard constraints learned from the D3DMetal/FXC path:
 //
 //  * No `sampler` binding. Naga's HLSL backend turns a sampler into a
 //    sampler-heap/resource array, which D3DMetal's FXC rejects with
@@ -8,11 +8,14 @@
 //    renderer also used `textureLoad`, never `textureSample`.
 //  * No `textureDimensions()`. The size is passed in a uniform instead, so the
 //    shader does not depend on `GetDimensions` translation.
+//  * The vertex stage returns `@builtin(position)` directly, never a struct
+//    with a `@location` varying. `solid.wgsl` draws fine with exactly this
+//    shape while the struct-returning version produced a silently dropped
+//    draw, even with an empty pipeline layout and a constant-colour fragment
+//    shader - so the varying, not the bind group, was what D3DMetal refused.
 //
-// The frame is sampled from `@builtin(position)` rather than from an
-// interpolated varying: the fragment position is a plain `SV_Position` input
-// and gives us the exact destination pixel, which also means no UV-varying
-// interpolation can go wrong.
+// The frame texel is derived from `@builtin(position)`, which is a plain
+// `SV_Position` fragment input: no interpolation is involved at all.
 
 struct Params {
     tex_size: vec2<f32>,
@@ -24,22 +27,16 @@ struct Params {
 @group(0) @binding(0) var raw_frame: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> params: Params;
 
-struct Vertex {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-// Single oversized triangle that covers the whole clip volume. `uv` spans
-// 0..1 over the visible [-1, 1] square, which the `fs_uv` diagnostic uses.
+// Single oversized triangle covering the whole clip volume. Identical to the
+// vertex stage in `solid.wgsl`, which is the one variant known to rasterise.
 @vertex
-fn vs(@builtin(vertex_index) index: u32) -> Vertex {
+fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
-    return Vertex(vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0), uv);
+    return vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
 }
 
-// Default path: derive the texture texel from the destination framebuffer
-// pixel, scaled by the viewport. Magenta outside the viewport makes a wrong
-// origin/scale immediately visible.
+// Default path: map the destination framebuffer pixel through the viewport.
+// Magenta outside the viewport makes a wrong origin/scale immediately visible.
 @fragment
 fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let local = (position.xy - params.origin) / params.target_size;
@@ -48,14 +45,6 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     }
     let size = vec2<i32>(params.tex_size);
     let pixel = clamp(vec2<i32>(local * params.tex_size), vec2<i32>(0), size - vec2<i32>(1));
-    return textureLoad(raw_frame, pixel, 0);
-}
-
-// Diagnostic: same lookup, but driven by the interpolated vertex UV.
-@fragment
-fn fs_uv(input: Vertex) -> @location(0) vec4<f32> {
-    let size = vec2<i32>(params.tex_size);
-    let pixel = clamp(vec2<i32>(input.uv * params.tex_size), vec2<i32>(0), size - vec2<i32>(1));
     return textureLoad(raw_frame, pixel, 0);
 }
 
