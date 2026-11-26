@@ -59,6 +59,12 @@ unsafe extern "system" fn overlay_wndproc(
     // forwarded unchanged. `WM_MOUSEWHEEL`/`WM_MOUSEHWHEEL` carry screen
     // coordinates in `wparam`, which need no translation either.
     if is_mouse_input(msg) {
+        if msg == WM_LBUTTONDOWN {
+            crate::logging::log_msg(&format!(
+                "overlay: received left click lparam=0x{:x}",
+                lparam.0
+            ));
+        }
         let target = INPUT_TARGET.load(Ordering::Relaxed);
         if target != 0 {
             let game = HWND(target as *mut c_void);

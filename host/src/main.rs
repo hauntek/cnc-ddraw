@@ -14,15 +14,19 @@ mod presenter;
 use std::ffi::c_void;
 use std::sync::atomic::Ordering;
 
-use windows::Win32::Foundation::{CloseHandle, HWND, POINT, RECT, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_SYNCHRONIZE, SetEvent, WaitForSingleObject,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, IsWindowEnabled, VK_LBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, IsWindowEnabled, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowRect,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible, WindowFromPoint, GUITHREADINFO,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW, WindowFromPoint,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, GUITHREADINFO,
 };
 
 use ddraw_protocol as protocol;
@@ -111,6 +115,104 @@ impl InputProbe {
     }
 }
 
+const MK_LBUTTON: usize = 0x0001;
+const MK_RBUTTON: usize = 0x0002;
+const MK_MBUTTON: usize = 0x0010;
+
+/// Optional input bridge: samples the real mouse and posts synthetic button
+/// messages to the game window.
+///
+/// Wine does not reliably route mouse input past a topmost window, so the game
+/// may never see a click even when the overlay is invisible to
+/// `WindowFromPoint`. This path does not depend on routing at all: it reads
+/// `GetCursorPos`/`GetAsyncKeyState` and posts `WM_*BUTTON*` with the game's
+/// client coordinates. Enable with `CNC_DDRAW_HOST_INPUT_BRIDGE=1`.
+#[derive(Default)]
+struct InputBridge {
+    last_pos: Option<(i32, i32)>,
+    left: bool,
+    right: bool,
+    middle: bool,
+}
+
+impl InputBridge {
+    fn poll(&mut self, game: HWND) {
+        // SAFETY: every call takes scalars/handles and writes into stack values
+        // owned by this function.
+        unsafe {
+            if GetForegroundWindow() != game {
+                return;
+            }
+            let mut cursor = POINT::default();
+            if GetCursorPos(&mut cursor).is_err() {
+                return;
+            }
+            let mut client = RECT::default();
+            if GetClientRect(game, &mut client).is_err() {
+                return;
+            }
+            let mut origin = POINT { x: 0, y: 0 };
+            if !ClientToScreen(game, &mut origin).as_bool() {
+                return;
+            }
+            let x = cursor.x - origin.x;
+            let y = cursor.y - origin.y;
+            let inside = x >= 0 && y >= 0 && x < client.right && y < client.bottom;
+
+            let left = GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0;
+            let right = GetAsyncKeyState(i32::from(VK_RBUTTON.0)) < 0;
+            let middle = GetAsyncKeyState(i32::from(VK_MBUTTON.0)) < 0;
+            let moved = self.last_pos != Some((x, y));
+            self.last_pos = Some((x, y));
+            let left_down = left && !self.left;
+            let left_up = !left && self.left;
+            let right_down = right && !self.right;
+            let right_up = !right && self.right;
+            let middle_down = middle && !self.middle;
+            let middle_up = !middle && self.middle;
+            self.left = left;
+            self.right = right;
+            self.middle = middle;
+            if !inside {
+                return;
+            }
+
+            let lparam =
+                LPARAM(((((y as u32) & 0xffff) << 16) | ((x as u32) & 0xffff)) as isize);
+            let post = |msg: u32, wparam: usize| {
+                // SAFETY: `game` is a window handle supplied by the producer;
+                // this only enqueues a message and never dereferences data.
+                let _ = PostMessageW(Some(game), msg, WPARAM(wparam), lparam);
+            };
+            let edge = left_down || left_up || right_down || right_up || middle_down || middle_up;
+            if moved && !edge {
+                post(WM_MOUSEMOVE, 0);
+            }
+            if left_down {
+                post(WM_MOUSEMOVE, MK_LBUTTON);
+                post(WM_LBUTTONDOWN, MK_LBUTTON);
+                logging::log_msg(&format!("input bridge: left down at ({x},{y})"));
+            }
+            if left_up {
+                post(WM_LBUTTONUP, 0);
+                logging::log_msg(&format!("input bridge: left up at ({x},{y})"));
+            }
+            if right_down {
+                post(WM_RBUTTONDOWN, MK_RBUTTON);
+            }
+            if right_up {
+                post(WM_RBUTTONUP, 0);
+            }
+            if middle_down {
+                post(WM_MBUTTONDOWN, MK_MBUTTON);
+            }
+            if middle_up {
+                post(WM_MBUTTONUP, 0);
+            }
+        }
+    }
+}
+
 struct Args {
     base: String,
     hwnd: u32,
@@ -190,31 +292,17 @@ fn run() -> Result<(), String> {
     // forwarded to the game window.
     crate::overlay::set_input_target(game);
 
-    // Present into the game's own window instead of the overlay. This leaves no
-    // window above the game at all, so the game's thread receives real mouse
-    // input (and its `GetKeyState` sees the buttons); the overlay keeps D3DMetal
-    // in one process but Wine does not route clicks through it.
-    let mut present_into_game = std::env::var_os("CNC_DDRAW_HOST_GAMEWINDOW").is_some();
-    let target = if present_into_game { game } else { overlay.hwnd() };
-    let mut presenter = match Presenter::new(target, overlay.hinstance(), &args.backend, args.maintas)
-    {
-        Ok(presenter) => presenter,
-        Err(err) if present_into_game => {
-            // Cross-process swapchains are supported by DXGI, but keep the
-            // picture alive if this Wine/D3DMetal build refuses one.
-            logging::log_msg(&format!(
-                "game-window surface unavailable ({err}); presenting into the overlay instead"
-            ));
-            present_into_game = false;
-            Presenter::new(
-                overlay.hwnd(),
-                overlay.hinstance(),
-                &args.backend,
-                args.maintas,
-            )?
-        }
-        Err(err) => return Err(err),
-    };
+    // The swapchain must live in the process that owns the window: D3DMetal
+    // attaches its Metal layer to the HWND's NSView, which belongs to whichever
+    // process created the window. Creating a swapchain for the game's HWND from
+    // this process therefore crashes inside DXGI, so the overlay window (owned
+    // by us) is the only presenter target.
+    let mut presenter = Presenter::new(
+        overlay.hwnd(),
+        overlay.hinstance(),
+        &args.backend,
+        args.maintas,
+    )?;
     // After the swapchain exists, make sure the overlay can never swallow a
     // click meant for the game window underneath it. Set
     // `CNC_DDRAW_HOST_OVERLAY_INPUT=1` to keep the old interactive overlay for
@@ -224,23 +312,34 @@ fn run() -> Result<(), String> {
     } else {
         logging::log_msg("overlay: left interactive (CNC_DDRAW_HOST_OVERLAY_INPUT)");
     }
-    logging::log_msg(&format!(
-        "present target: {}",
-        if present_into_game {
-            "game window"
-        } else {
-            "overlay"
-        }
-    ));
+    logging::log_msg("present target: overlay");
     logging::log_msg("host ready");
 
     let mut last_seq = 0u32;
     let mut have_frame = false;
     let mut probe = InputProbe::default();
 
+    // `CNC_DDRAW_HOST_TIMING=1` reports where the host actually spends time.
+    let timing = std::env::var_os("CNC_DDRAW_HOST_TIMING").is_some();
+    let mut window_start = std::time::Instant::now();
+    let mut window_loops = 0u64;
+    let mut window_uploads = 0u64;
+    let mut window_presents = 0u64;
+    let mut upload_ns = 0u64;
+    let mut present_ns = 0u64;
+    let mut bridge = if std::env::var_os("CNC_DDRAW_HOST_INPUT_BRIDGE").is_some() {
+        logging::log_msg("input bridge: enabled");
+        Some(InputBridge::default())
+    } else {
+        None
+    };
+
     loop {
         Overlay::pump_messages();
         probe.poll(game, overlay.hwnd());
+        if let Some(bridge) = bridge.as_mut() {
+            bridge.poll(game);
+        }
 
         // SAFETY: Both handles are valid and owned until the end of this
         // function; zero timeout makes these non-blocking probes.
@@ -260,7 +359,11 @@ fn run() -> Result<(), String> {
         let seq = header.seq.load(Ordering::Acquire);
         if seq != last_seq {
             let slot = source.slot(seq as usize % protocol::SLOT_COUNT);
-            match presenter.upload(header, slot) {
+            let started = std::time::Instant::now();
+            let result = presenter.upload(header, slot);
+            upload_ns += started.elapsed().as_nanos() as u64;
+            window_uploads += 1;
+            match result {
                 Ok(()) => {
                     last_seq = seq;
                     have_frame = true;
@@ -271,10 +374,12 @@ fn run() -> Result<(), String> {
 
         if have_frame && overlay::game_visible(game) {
             if let Some((x, y, width, height)) = overlay::client_screen_rect(game) {
-                if !present_into_game {
-                    overlay.show_at(x, y, width, height);
-                }
-                match presenter.present(width as u32, height as u32) {
+                overlay.show_at(x, y, width, height);
+                let started = std::time::Instant::now();
+                let result = presenter.present(width as u32, height as u32);
+                present_ns += started.elapsed().as_nanos() as u64;
+                window_presents += 1;
+                match result {
                     Ok(()) => {
                         // SAFETY: The event handle is valid for the process lifetime.
                         unsafe {
@@ -288,6 +393,32 @@ fn run() -> Result<(), String> {
             }
         } else {
             overlay.hide();
+        }
+
+        window_loops += 1;
+        if timing && window_start.elapsed().as_secs_f64() >= 2.0 {
+            let secs = window_start.elapsed().as_secs_f64();
+            let per = |total: u64, count: u64| {
+                if count == 0 {
+                    0.0
+                } else {
+                    total as f64 / count as f64 / 1_000_000.0
+                }
+            };
+            logging::log_msg(&format!(
+                "timing: {:.1} loops/s upload {:.1}/s {:.2}ms present {:.1}/s {:.2}ms",
+                window_loops as f64 / secs,
+                window_uploads as f64 / secs,
+                per(upload_ns, window_uploads),
+                window_presents as f64 / secs,
+                per(present_ns, window_presents),
+            ));
+            window_start = std::time::Instant::now();
+            window_loops = 0;
+            window_uploads = 0;
+            window_presents = 0;
+            upload_ns = 0;
+            present_ns = 0;
         }
 
         // Wait for a new frame, but wake up regularly to follow the game

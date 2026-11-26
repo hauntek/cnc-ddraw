@@ -581,6 +581,11 @@ impl Presenter {
         if !self.configured || self.config.width != target_w || self.config.height != target_h {
             self.config.width = target_w;
             self.config.height = target_h;
+            if !self.configured {
+                logging::log_msg(&format!(
+                    "present: configuring swapchain {target_w}x{target_h}"
+                ));
+            }
             self.surface.configure(&self.device, &self.config);
             self.configured = true;
         }

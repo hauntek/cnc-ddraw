@@ -185,7 +185,8 @@ Host-only presentation diagnostics (set in the environment of
 | `CNC_DDRAW_HOST_CONST_NOBIND=1` | GPU path: same vertex shader and constant green fragment, but an **empty** pipeline layout and no bind group |
 | `CNC_DDRAW_HOST_POSITION_UV=1` | GPU path: sample from the interpolated vertex UV |
 | `CNC_DDRAW_HOST_FULL_VIEWPORT=1` | Stretch the frame over the whole target |
-| `CNC_DDRAW_HOST_GAMEWINDOW=1` | Create the swapchain on the **game's own HWND** and never show the overlay |
+| `CNC_DDRAW_HOST_TIMING=1` | Log `timing: ...` every 2 s with loop/upload/present rates and average CPU cost |
+| `CNC_DDRAW_HOST_INPUT_BRIDGE=1` | Poll the real mouse and post synthetic button messages to the game window |
 | `CNC_DDRAW_HOST_OVERLAY_INPUT=1` | Keep the overlay window enabled and rely on input forwarding only |
 
 On the first GPU-path present the host also copies the first texture row back
@@ -218,10 +219,16 @@ actually go?" without guessing:
 
   Neither of those is enough when Wine simply keeps routing input to a disabled
   topmost window: the game then never sees the click and its thread's
-  `GetKeyState` never updates. `CNC_DDRAW_HOST_GAMEWINDOW=1` removes the problem
-  by construction - the host creates its swapchain on the game's HWND itself
-  (DXGI allows a cross-process window), never shows the overlay, and the game
-  receives input exactly as it would without us.
+  `GetKeyState` never updates. `CNC_DDRAW_HOST_INPUT_BRIDGE=1` works around that
+  without touching window routing: it samples `GetCursorPos` and
+  `GetAsyncKeyState` and posts `WM_*BUTTON*` messages with the game's client
+  coordinates, so the game's thread really does process the input.
+
+  Presenting into the game's own HWND is **not** an option here: D3DMetal
+  attaches its Metal layer to the HWND's NSView, which belongs to the process
+  that created the window, so `CreateSwapChainForHwnd` on the game's window from
+  this process crashes inside DXGI. The swapchain must live in the process that
+  owns the window, which is why the overlay exists at all.
 - `protocol/src/lib.rs` is the shared frame-ring header. It uses only 32-bit
   fields and atomics so i686 and x86_64 agree on layout.
 
