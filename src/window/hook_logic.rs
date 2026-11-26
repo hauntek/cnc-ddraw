@@ -1,7 +1,7 @@
 //! Pure Rust decision logic for Win32 API hooks, `WH_GETMESSAGE`, and host WndProc subclassing.
 #![forbid(unsafe_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BITSPIXEL, HORZRES, LOGPIXELSX, LOGPIXELSY, VERTRES};
@@ -31,8 +31,21 @@ use super::{
 };
 
 pub(super) fn virtual_window_rect(hwnd: HWND, include_dialogs: bool) -> Option<RECT> {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
     let (bound, w, h, _) = logical_mode()?;
     if hwnd == bound || hwnd == desktop_window() {
+        // Sample what the game believes its window size is: if it ever sees the
+        // real 1280x960 here, its own cursor-to-surface maths would scale a
+        // second time on top of the hook below.
+        if CALLS.fetch_add(1, Ordering::Relaxed) % 120 == 0 {
+            crate::compat::log_msg(&format!(
+                "clientrect: hwnd=0x{:x} returning {}x{} real={:?}",
+                hwnd.0 as usize,
+                w,
+                h,
+                window_rect(bound).ok().map(|r| (r.right - r.left, r.bottom - r.top))
+            ));
+        }
         return Some(RECT {
             left: 0,
             top: 0,
@@ -80,12 +93,26 @@ pub(super) fn virtual_screen_to_client(hwnd: HWND, pt: &mut POINT) -> Option<boo
 }
 
 pub(super) fn virtual_cursor_pos() -> Option<POINT> {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
     let mut raw = cursor_pos().ok()?;
+    let physical = raw;
     if let Some((bound, w, h, _)) = logical_mode() {
         if screen_to_client(bound, &mut raw) {
             let (lx, ly) = client_to_logical(bound, raw.x, raw.y, w, h);
             raw = POINT { x: lx, y: ly };
         }
+    }
+    // Sample what the game's own polling sees, so it can be compared with the
+    // coordinates the click message carries.
+    if CALLS.fetch_add(1, Ordering::Relaxed) % 60 == 0 {
+        crate::compat::log_msg(&format!(
+            "cursorpos: screen=({},{}) returned=({},{}) logical={:?}",
+            physical.x,
+            physical.y,
+            raw.x,
+            raw.y,
+            logical_mode().map(|(_, w, h, _)| (w, h))
+        ));
     }
     Some(raw)
 }
