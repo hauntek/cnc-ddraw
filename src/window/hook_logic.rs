@@ -26,7 +26,7 @@ use super::input::{
 };
 use super::overlay::ensure_present_on_top_if_active;
 use super::{
-    bound_hwnd, is_present_hwnd, is_scaling_active, logical_mode, present_hwnd, FLUSH_TIMER_ID,
+    bound_hwnd, is_present_hwnd, is_scaling_active, logical_mode, FLUSH_TIMER_ID,
     WM_APP_FLUSH,
 };
 
@@ -267,7 +267,7 @@ pub(super) fn handle_subclass_message(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
-    mut lparam: LPARAM,
+    lparam: LPARAM,
     activate_passed: &AtomicBool,
     activateapp_passed: &AtomicBool,
 ) -> SubclassAction {
@@ -325,25 +325,13 @@ pub(super) fn handle_subclass_message(
     if matches!(msg, WM_MOVE | WM_SIZE | WM_WINDOWPOSCHANGED) && bound_hwnd() == Some(hwnd) {
         crate::draw::on_host_window_changed();
     }
-    // Only remap physical coordinates on `bound` when no owned presentation overlay exists;
-    // when `PRESENT_HWND` is active, `present_wndproc` and `getmsg_hook` deliver logical coords.
-    if is_mouse_message(msg) && present_hwnd().is_none() {
-        if let Some((bound, w, h, _)) = logical_mode() {
-            if hwnd == bound {
-                let raw = lparam.0 as u32;
-                let mut px = (raw & 0xffff) as i16 as i32;
-                let mut py = ((raw >> 16) & 0xffff) as i16 as i32;
-                if msg == WM_MOUSEWHEEL {
-                    let mut pt = POINT { x: px, y: py };
-                    if screen_to_client(bound, &mut pt) {
-                        px = pt.x;
-                        py = pt.y;
-                    }
-                }
-                let (lx, ly) = client_to_logical(bound, px, py, w, h);
-                lparam = LPARAM(((ly as u16 as u32) << 16 | (lx as u16 as u32)) as isize);
-            }
-        }
-    }
+    // No coordinate remapping here: every mouse message is posted to the thread
+    // queue, so it already went through the `WH_GETMESSAGE` hook, which rewrote
+    // the coordinates from window pixels to the game's logical resolution. Doing
+    // it a second time in the window procedure scaled the coordinates twice
+    // whenever no in-process presenter overlay existed - which is exactly the
+    // `presenter = host` case - so clicks landed at 1/scale of where the player
+    // actually aimed (a 1280x960 window turned a 800x600-logical click into
+    // 0.625x of it) while the polled cursor stayed correct.
     SubclassAction::Forward(lparam)
 }
