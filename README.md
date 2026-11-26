@@ -171,6 +171,12 @@ windowed mode.
   sampler binding: naga's HLSL backend turns a sampler into a sampler-heap
   resource array that D3DMetal's FXC rejects with `E5017`.
 
+  `CNC_DDRAW_HOST_RAW=1` additionally moves the format conversion to the GPU:
+  the surface is uploaded as `R8Uint`/`R16Uint`/`R32Uint` and `host/src/raw.wgsl`
+  unpacks RGB555/RGB565/XRGB, applies the 256x1 palette/gamma table and picks the
+  texel, exactly like the original in-process renderer. The CPU then only forwards
+  `pitch * height` bytes per frame.
+
   The vertex stage must return `@builtin(position)` directly. A version that
   returned a struct with a `@location(0)` varying produced a draw that D3DMetal
   rendered nothing on D3DMetal: no pixels even with an empty pipeline layout, no
@@ -187,6 +193,7 @@ path, which is the default - `CNC_DDRAW_HOST_BLIT=1` disables them):
 | Variable | Effect |
 | --- | --- |
 | `CNC_DDRAW_HOST_BLIT=1` | Use the CPU nearest-neighbour upscale plus `copy_texture_to_texture` instead of the render pipeline |
+| `CNC_DDRAW_HOST_RAW=1` | Upload the raw surface bytes and let `host/src/raw.wgsl` unpack the format and apply the LUT, so the CPU never touches a pixel |
 | `CNC_DDRAW_HOST_CLEAR=red\|green\|blue\|white\|magenta\|0xRRGGBB` | Clear the swapchain and skip drawing |
 | `CNC_DDRAW_HOST_SOLID_DRAW=1` | GPU path: draw a fullscreen red triangle with no bindings |
 | `CNC_DDRAW_HOST_SOLID=1` | Upload an all-red RGBA frame instead of the game frame |
