@@ -110,6 +110,7 @@ pub struct Presenter {
     config: wgpu::SurfaceConfiguration,
     configured: bool,
     pipeline: wgpu::RenderPipeline,
+    position_pipeline: wgpu::RenderPipeline,
     solid_pipeline: wgpu::RenderPipeline,
     frame: Option<UploadedFrame>,
     staging: Vec<u8>,
@@ -118,6 +119,7 @@ pub struct Presenter {
     clear_only: bool,
     solid: bool,
     solid_draw: bool,
+    position_uv: bool,
     full_viewport: bool,
     logged_frame: bool,
     logged_present: bool,
@@ -209,6 +211,28 @@ impl Presenter {
             cache: None,
         });
 
+        let position_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("DirectDraw position-uv diagnostic"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_position"),
+                compilation_options: Default::default(),
+                targets: &[Some(surface_cfg.format.into())],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let solid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("DirectDraw solid diagnostic"),
             source: wgpu::ShaderSource::Wgsl(include_str!("solid.wgsl").into()),
@@ -239,9 +263,10 @@ impl Presenter {
         let clear_only = std::env::var_os("CNC_DDRAW_HOST_CLEAR").is_some();
         let solid = std::env::var_os("CNC_DDRAW_HOST_SOLID").is_some();
         let solid_draw = std::env::var_os("CNC_DDRAW_HOST_SOLID_DRAW").is_some();
+        let position_uv = std::env::var_os("CNC_DDRAW_HOST_POSITION_UV").is_some();
         let full_viewport = std::env::var_os("CNC_DDRAW_HOST_FULL_VIEWPORT").is_some();
         logging::log_msg(&format!(
-            "presenter init: format={:?} clear_only={clear_only} solid={solid} solid_draw={solid_draw} full_viewport={full_viewport}",
+            "presenter init: format={:?} clear_only={clear_only} solid={solid} solid_draw={solid_draw} position_uv={position_uv} full_viewport={full_viewport}",
             surface_cfg.format
         ));
 
@@ -252,6 +277,7 @@ impl Presenter {
             config: surface_cfg,
             configured: false,
             pipeline,
+            position_pipeline,
             solid_pipeline,
             frame: None,
             staging: Vec::new(),
@@ -260,6 +286,7 @@ impl Presenter {
             clear_only,
             solid,
             solid_draw,
+            position_uv,
             full_viewport,
             logged_frame: false,
             logged_present: false,
@@ -509,6 +536,12 @@ impl Presenter {
             if self.solid_draw {
                 pass.set_pipeline(&self.solid_pipeline);
                 pass.draw(0..3, 0..1);
+            } else if self.position_uv {
+                if let Some(frame) = frame {
+                    pass.set_pipeline(&self.position_pipeline);
+                    pass.set_bind_group(0, &frame.bindings, &[]);
+                    pass.draw(0..3, 0..1);
+                }
             } else if let Some(frame) = frame {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &frame.bindings, &[]);

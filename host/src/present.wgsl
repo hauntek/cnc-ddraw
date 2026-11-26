@@ -21,3 +21,16 @@ fn fs(input: Vertex) -> @location(0) vec4<f32> {
     let pixel = clamp(vec2<i32>(input.uv * vec2<f32>(size)), vec2<i32>(0), size - vec2<i32>(1));
     return textureLoad(raw_frame, pixel, 0);
 }
+
+// Diagnostic: interpret framebuffer position as a 1:1 texture coordinate.
+// If this shows the top-left 800x600 of the frame, texture upload and
+// textureLoad are fine and the interpolated UV varying is the broken part.
+@fragment
+fn fs_position(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let size = vec2<i32>(textureDimensions(raw_frame));
+    let pixel = vec2<i32>(position.xy);
+    if pixel.x >= size.x || pixel.y >= size.y {
+        return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+    }
+    return textureLoad(raw_frame, pixel, 0);
+}
