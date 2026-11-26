@@ -6,23 +6,25 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BITSPIXEL, HORZRES, LOGPIXELSX, LOGPIXELSY, VERTRES};
 use windows::Win32::UI::WindowsAndMessaging::{
-    MSG, SET_WINDOW_POS_FLAGS, SM_CXSCREEN, SM_CYSCREEN, WM_ACTIVATE, WM_ACTIVATEAPP, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEWHEEL, WM_MOVE, WM_NCACTIVATE, WM_RBUTTONDOWN, WM_SIZE,
-    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_WINDOWPOSCHANGED,
+    MSG, SET_WINDOW_POS_FLAGS, SM_CXSCREEN, SM_CXFULLSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
+    SM_CYFULLSCREEN, SM_CYVIRTUALSCREEN, WM_ACTIVATE, WM_ACTIVATEAPP, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE,
+    WM_NCACTIVATE, WM_RBUTTONDOWN, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER,
+    WM_WINDOWPOSCHANGED,
 };
 
 use crate::config;
 use crate::win32::geometry::{
-    client_to_screen, clip_cursor, cursor_pos, get_capture, map_rect, screen_to_client,
-    set_cursor_pos, window_from_point, window_rect,
+    client_to_screen, clip_cursor, cursor_pos, map_rect, screen_to_client, set_cursor_pos,
+    window_from_point, window_rect,
 };
 use crate::win32::hwnd::{
     bring_window_to_top, desktop_window, kill_timer, move_window, set_window_pos,
 };
 
 use super::input::{
-    client_origin_in_bound, client_to_logical, hit_test_logical_child, is_mouse_message,
-    is_related_dialog_window, logical_to_client,
+    client_to_logical, hit_test_real_child, is_mouse_message, is_related_dialog_window,
+    logical_to_client,
 };
 use super::overlay::ensure_present_on_top_if_active;
 use super::{
@@ -30,66 +32,56 @@ use super::{
     WM_APP_FLUSH,
 };
 
-pub(super) fn virtual_window_rect(hwnd: HWND, include_dialogs: bool) -> Option<RECT> {
+pub(super) fn virtual_window_rect(hwnd: HWND, _include_dialogs: bool) -> Option<RECT> {
     static CALLS: AtomicUsize = AtomicUsize::new(0);
     let (bound, w, h, _) = logical_mode()?;
-    if hwnd == bound || hwnd == desktop_window() {
-        // Sample what the game believes its window size is: if it ever sees the
-        // real 1280x960 here, its own cursor-to-surface maths would scale a
-        // second time on top of the hook below.
-        if CALLS.fetch_add(1, Ordering::Relaxed) % 120 == 0 {
-            crate::compat::log_msg(&format!(
-                "clientrect: hwnd=0x{:x} returning {}x{} real={:?}",
-                hwnd.0 as usize,
-                w,
-                h,
-                window_rect(bound).ok().map(|r| (r.right - r.left, r.bottom - r.top))
-            ));
-        }
-        return Some(RECT {
-            left: 0,
-            top: 0,
-            right: w as i32,
-            bottom: h as i32,
-        });
+    if hwnd != bound && hwnd != desktop_window() {
+        // Dialogs and their controls are real windows laid out in real pixels: the game positions
+        // their real children from `GetWindowRect`, so handing it virtual pixels here would put
+        // its idea of the dialog in a different space than the controls it is talking to.
+        return None;
     }
-    if include_dialogs && is_related_dialog_window(bound, hwnd) {
-        return Some(map_rect(None, Some(bound), window_rect(hwnd).ok()?));
+    // Sample what the game believes its window size is: if it ever sees the
+    // real 1280x960 here, its own cursor-to-surface maths would scale a
+    // second time on top of the hook below.
+    if CALLS.fetch_add(1, Ordering::Relaxed) % 120 == 0 {
+        crate::compat::log_msg(&format!(
+            "clientrect: hwnd=0x{:x} returning {}x{} real={:?}",
+            hwnd.0 as usize,
+            w,
+            h,
+            window_rect(bound).ok().map(|r| (r.right - r.left, r.bottom - r.top))
+        ));
     }
-    None
+    Some(RECT {
+        left: 0,
+        top: 0,
+        right: w as i32,
+        bottom: h as i32,
+    })
 }
 
 pub(super) fn virtual_system_metrics(index: i32) -> Option<i32> {
     let (_, w, h, _) = logical_mode()?;
-    if index == SM_CXSCREEN.0 {
+    if index == SM_CXSCREEN.0 || index == SM_CXFULLSCREEN.0 || index == SM_CXVIRTUALSCREEN.0 {
         return Some(w as i32);
     }
-    if index == SM_CYSCREEN.0 {
+    if index == SM_CYSCREEN.0 || index == SM_CYFULLSCREEN.0 || index == SM_CYVIRTUALSCREEN.0 {
         return Some(h as i32);
     }
     None
 }
 
-pub(super) fn virtual_client_to_screen(hwnd: HWND, pt: &mut POINT) -> Option<bool> {
+pub(super) fn virtual_client_to_screen(hwnd: HWND, _pt: &mut POINT) -> Option<bool> {
     let (bound, _, _, _) = logical_mode()?;
-    if hwnd == bound {
-        return Some(true);
-    }
-    if is_related_dialog_window(bound, hwnd) {
-        return Some(client_to_screen(hwnd, pt) && screen_to_client(bound, pt));
-    }
-    None
+    // In the game's pretend world the window sits at the screen origin, so screen and client
+    // space coincide for it; everything else (real dialogs and their controls) stays real.
+    (hwnd == bound).then_some(true)
 }
 
-pub(super) fn virtual_screen_to_client(hwnd: HWND, pt: &mut POINT) -> Option<bool> {
+pub(super) fn virtual_screen_to_client(hwnd: HWND, _pt: &mut POINT) -> Option<bool> {
     let (bound, _, _, _) = logical_mode()?;
-    if hwnd == bound {
-        return Some(true);
-    }
-    if is_related_dialog_window(bound, hwnd) {
-        return Some(client_to_screen(bound, pt) && screen_to_client(hwnd, pt));
-    }
-    None
+    (hwnd == bound).then_some(true)
 }
 
 pub(super) fn virtual_cursor_pos() -> Option<POINT> {
@@ -164,10 +156,32 @@ pub(super) fn virtual_clip_cursor() -> Option<RECT> {
 }
 
 pub(super) fn virtual_window_from_point(point: POINT) -> HWND {
-    if let Some((bound, _, _, _)) = logical_mode() {
-        return hit_test_logical_child(bound, point.x, point.y).unwrap_or(bound);
+    if let Some((bound, w, h, _)) = logical_mode() {
+        // The game asks in its own (logical) space; the windows it may hit are real, so map the
+        // query into real client pixels before hit-testing the game's own window tree.
+        let (px, py) = logical_to_client(bound, point.x, point.y, w, h);
+        return hit_test_real_child(bound, px, py).unwrap_or(bound);
     }
     window_from_point(point)
+}
+
+/// Position of the message currently being retrieved, in the game's pretend screen space.
+///
+/// `GetMessagePos` returns real screen pixels, which is one of the few channels through which a
+/// windowed game can still observe the true window geometry; virtualizing it keeps every mouse
+/// position the game can read in the same 800x600 space as `GetCursorPos` and the message lParam.
+pub(super) fn virtual_message_pos() -> Option<(i32, i32)> {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let (bound, w, h, _) = logical_mode()?;
+    let mut pt = cursor_pos().ok()?;
+    if !screen_to_client(bound, &mut pt) {
+        return None;
+    }
+    let (lx, ly) = client_to_logical(bound, pt.x, pt.y, w, h);
+    if CALLS.fetch_add(1, Ordering::Relaxed) % 240 == 0 {
+        crate::compat::log_msg(&format!("getmsgpos: returning=({},{})", lx, ly));
+    }
+    Some((lx, ly))
 }
 
 pub(super) fn handle_set_window_pos(
@@ -224,6 +238,12 @@ pub(super) fn handle_move_window(
     move_window(hwnd, x, y, width, height, repaint)
 }
 
+/// Client size the game should believe in, for window-geometry messages it parses directly.
+pub(super) fn virtual_client_size() -> Option<(u32, u32)> {
+    let (_, w, h, _) = logical_mode()?;
+    Some((w, h))
+}
+
 pub(super) fn virtual_device_caps(index: i32) -> Option<i32> {
     if bound_hwnd().is_some() && (index == LOGPIXELSX.0 as i32 || index == LOGPIXELSY.0 as i32) {
         return Some(96);
@@ -242,23 +262,18 @@ pub(super) fn virtual_device_caps(index: i32) -> Option<i32> {
 }
 
 pub(super) fn rewrite_getmsg(msg: &mut MSG) {
-    let Some((bound, w, h, _)) = logical_mode() else {
+    let Some((bound, _, _, _)) = logical_mode() else {
         return;
     };
-    let is_bound = msg.hwnd == bound;
-    let is_dialog = is_related_dialog_window(bound, msg.hwnd);
-    if !is_bound && !is_dialog {
+    if msg.hwnd != bound {
+        // Real dialogs and their controls live in real pixels; the window manager already routed
+        // this message by the real cursor position, so leave both target and coordinates alone.
         return;
     }
-    let Ok(mut cursor) = cursor_pos() else {
+    let Some((lx, ly)) = virtual_message_pos() else {
         return;
     };
-    if !screen_to_client(bound, &mut cursor) {
-        return;
-    }
-    let (lx, ly) = client_to_logical(bound, cursor.x, cursor.y, w, h);
     let was_click = msg.message == WM_LBUTTONDOWN;
-    let from = msg.hwnd;
     let original = msg.pt;
     msg.pt = POINT { x: lx, y: ly };
     if !is_mouse_message(msg.message) {
@@ -270,33 +285,19 @@ pub(super) fn rewrite_getmsg(msg: &mut MSG) {
     ) {
         ensure_present_on_top_if_active(bound);
     }
-    let captured = get_capture();
-    let target = if captured == msg.hwnd || is_bound {
-        msg.hwnd
-    } else {
-        hit_test_logical_child(bound, lx, ly).unwrap_or(bound)
-    };
-    msg.hwnd = target;
+    // Mouse messages carry client-relative coordinates for the receiving window, and the game
+    // believes this window is 800x600 with the cursor reported in the same space.
+    msg.lParam = LPARAM(((ly as u16 as u32) << 16 | (lx as u16 as u32)) as isize);
     if was_click {
         crate::compat::log_msg(&format!(
-            "getmsg: from=0x{:x} msg_pt=({},{}) client=({},{}) logical=({},{}) target=0x{:x}",
-            from.0 as usize,
+            "getmsg: from=0x{:x} msg_pt=({},{}) logical=({},{}) target=0x{:x}",
+            bound.0 as usize,
             original.x,
             original.y,
-            cursor.x,
-            cursor.y,
             lx,
             ly,
-            target.0 as usize
+            msg.hwnd.0 as usize
         ));
-    }
-    if msg.message == WM_MOUSEWHEEL || target == bound {
-        msg.lParam = LPARAM(((ly as u16 as u32) << 16 | (lx as u16 as u32)) as isize);
-    } else {
-        let (tx, ty) = client_origin_in_bound(bound, target);
-        let cx = lx - tx;
-        let cy = ly - ty;
-        msg.lParam = LPARAM(((cy as u16 as u32) << 16 | (cx as u16 as u32)) as isize);
     }
 }
 
@@ -367,16 +368,87 @@ pub(super) fn handle_subclass_message(
     }
     if matches!(msg, WM_MOVE | WM_SIZE | WM_WINDOWPOSCHANGED) && bound_hwnd() == Some(hwnd) {
         crate::draw::on_host_window_changed();
+        // `WM_MOVE` carries the real client-area origin in screen pixels. The game's window is
+        // pretended to sit at the screen origin - that is what makes `ScreenToClient` and
+        // `GetCursorPos` agree - so report (0, 0) like `GetWindowRect` does. A game that subtracts
+        // this origin from the cursor position would otherwise shift every click by the real
+        // window offset.
+        if msg == WM_MOVE && logical_mode().is_some() {
+            let raw = lparam.0 as u32;
+            static MOVED: AtomicBool = AtomicBool::new(false);
+            if !MOVED.swap(true, Ordering::Relaxed) {
+                crate::compat::log_msg(&format!(
+                    "move: hwnd=0x{:x} real=({},{}) returning (0,0)",
+                    hwnd.0 as usize,
+                    (raw & 0xffff) as i16 as i32,
+                    ((raw >> 16) & 0xffff) as i16 as i32
+                ));
+            }
+            return SubclassAction::Forward(LPARAM(0));
+        }
+        // `WM_SIZE` is the last channel through which the game can still learn the real client
+        // size: `lParam` carries 1280x960 for a window that `GetClientRect` reports as 800x600.
+        // Engines cache exactly this as their view/window size and then scale mouse positions by
+        // it, which lands clicks at the wrong place. Report the surface size instead.
+        if msg == WM_SIZE {
+            let raw = lparam.0 as u32;
+            let cx = raw & 0xffff;
+            let cy = (raw >> 16) & 0xffff;
+            match logical_mode() {
+                Some((bound, w, h, _))
+                    if hwnd == bound && cx != 0 && cy != 0 && (cx != w || cy != h) =>
+                {
+                    crate::compat::log_msg(&format!(
+                        "size: hwnd=0x{:x} real={}x{} returning {}x{}",
+                        hwnd.0 as usize,
+                        cx,
+                        cy,
+                        w,
+                        h
+                    ));
+                    return SubclassAction::Forward(LPARAM(
+                        (((h & 0xffff) << 16) | (w & 0xffff)) as isize
+                    ));
+                }
+                _ => {
+                    // One-shot: a size the game sees before the surface size is known can pin its
+                    // mouse maths to the real client size for the rest of the run.
+                    static UNVIRTUALIZED: AtomicBool = AtomicBool::new(false);
+                    if cx != 0 && cy != 0 && !UNVIRTUALIZED.swap(true, Ordering::Relaxed) {
+                        crate::compat::log_msg(&format!(
+                            "size: hwnd=0x{:x} unvirtualized real={}x{} logical={:?}",
+                            hwnd.0 as usize,
+                            cx,
+                            cy,
+                            logical_mode().map(|(_, w, h, _)| (w, h))
+                        ));
+                    }
+                }
+            }
+        }
     }
-    if msg == WM_LBUTTONDOWN {
+    if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP {
         let raw = lparam.0 as u32;
         crate::compat::log_msg(&format!(
-            "subclass: hwnd=0x{:x} lparam=({},{}) wparam=0x{:x}",
+            "subclass: hwnd=0x{:x} msg=0x{:x} lparam=({},{}) wparam=0x{:x}",
             hwnd.0 as usize,
+            msg,
             (raw & 0xffff) as i16 as i32,
             ((raw >> 16) & 0xffff) as i16 as i32,
             wparam.0
         ));
+    }
+    if msg == WM_MOUSEMOVE {
+        static MOVES: AtomicUsize = AtomicUsize::new(0);
+        if MOVES.fetch_add(1, Ordering::Relaxed) % 120 == 0 {
+            let raw = lparam.0 as u32;
+            crate::compat::log_msg(&format!(
+                "subclass: hwnd=0x{:x} move=({},{})",
+                hwnd.0 as usize,
+                (raw & 0xffff) as i16 as i32,
+                ((raw >> 16) & 0xffff) as i16 as i32
+            ));
+        }
     }
     // No coordinate remapping here: every mouse message is posted to the thread
     // queue, so it already went through the `WH_GETMESSAGE` hook, which rewrote

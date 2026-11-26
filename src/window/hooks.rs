@@ -14,9 +14,9 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CallWindowProcA, CallWindowProcW, CreateDialogIndirectParamA,
     CreateDialogParamA, DialogBoxIndirectParamA, DialogBoxParamA, GetClientRect, GetClipCursor,
-    GetWindowLongA, GetWindowLongW, GetWindowRect, SetWindowLongA, SetWindowLongW,
+    GetMessagePos, GetWindowLongA, GetWindowLongW, GetWindowRect, SetWindowLongA, SetWindowLongW,
     SetWindowsHookExW, UnhookWindowsHookEx, DLGPROC, DLGTEMPLATE, GWLP_WNDPROC, HHOOK, MSG,
-    RT_DIALOG, WH_GETMESSAGE, WNDPROC,
+    RT_DIALOG, WH_GETMESSAGE, WM_WINDOWPOSCHANGED, WINDOWPOS, WNDPROC,
 };
 
 use crate::win32::geometry::is_window;
@@ -26,7 +26,6 @@ use crate::win32::{device_caps, iat, system_dpi, system_metrics, AtomicHwnd};
 use super::dialog_template::FontPatch;
 use super::hook_logic::{self, SubclassAction};
 use super::{bound_hwnd, FLUSH_TIMER_ID};
-
 static ORIG_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static SUBCLASSED_HWND: AtomicHwnd = AtomicHwnd::new();
 static SUBCLASSED_UNICODE: AtomicBool = AtomicBool::new(false);
@@ -100,6 +99,14 @@ unsafe extern "system" fn hook_GetCursorPos(pt: *mut POINT) -> BOOL {
     // SAFETY: Caller passed a non-null writable POINT pointer per Win32 GetCursorPos.
     unsafe { pt.write(pos) };
     BOOL(1)
+}
+
+unsafe extern "system" fn hook_GetMessagePos() -> u32 {
+    if let Some((x, y)) = hook_logic::virtual_message_pos() {
+        return ((y as u16 as u32) << 16) | (x as u16 as u32);
+    }
+    // SAFETY: GetMessagePos takes no arguments and needs no setup.
+    unsafe { GetMessagePos() }
 }
 
 unsafe extern "system" fn hook_SetCursorPos(x: i32, y: i32) -> BOOL {
@@ -405,6 +412,24 @@ unsafe extern "system" fn subclass_wndproc(
         }
         SubclassAction::Forward(lp) => lp,
     };
+    // `WM_WINDOWPOSCHANGED` carries the real client size and origin in its `WINDOWPOS`; report the
+    // surface size at the pretend origin so every geometry channel the game can parse agrees with
+    // `GetClientRect`/`GetWindowRect`.
+    if msg == WM_WINDOWPOSCHANGED && bound_hwnd() == Some(hwnd) {
+        if let Some((w, h)) = hook_logic::virtual_client_size() {
+            let pos = forwarded_lparam.0 as *mut WINDOWPOS;
+            if !pos.is_null() {
+                // SAFETY: WM_WINDOWPOSCHANGED's lParam is a writable WINDOWPOS owned by the caller
+                // of SendMessage for the duration of this call.
+                unsafe {
+                    (*pos).x = 0;
+                    (*pos).y = 0;
+                    (*pos).cx = w as i32;
+                    (*pos).cy = h as i32;
+                }
+            }
+        }
+    }
     let prev_raw = ORIG_WNDPROC.load(Ordering::Relaxed);
     // SAFETY: `prev_raw` was returned by `SetWindowLong(GWLP_WNDPROC)` for this window and
     // is invoked through the matching Unicode/ANSI `CallWindowProc`.
@@ -525,6 +550,11 @@ pub(crate) fn install_iat_hooks() {
             "user32.dll",
             "GetCursorPos",
             hook_GetCursorPos as *const () as usize,
+        ),
+        (
+            "user32.dll",
+            "GetMessagePos",
+            hook_GetMessagePos as *const () as usize,
         ),
         (
             "user32.dll",

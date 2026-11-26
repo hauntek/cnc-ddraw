@@ -254,6 +254,10 @@ pub unsafe fn create_surface(
     let surface = register_surface_object(display, data, primary, attached)?;
     if primary {
         crate::window::set_mode(width, height, (format.bytes() * 8) as u32, true);
+        // The window was resized before this surface size was known, so make the surface size the
+        // last `WM_SIZE` the game observes; a cached real client size would skew every mouse
+        // position it derives.
+        crate::window::notify_logical_size();
     }
     Ok(surface)
 }

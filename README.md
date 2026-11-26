@@ -219,6 +219,36 @@ On the first GPU-path present the host also copies the first texture row back
 and logs `gpu row0: ...`, which distinguishes "upload never reached the GPU"
 from "draw/sample path broken".
 
+### Coordinate space when the window is scaled
+
+The primary surface stays at the game's own resolution (for example 800x600)
+and the GPU upscales it, so at any other window size the game must never learn
+the real client size. Everything it can observe is virtualized to the surface
+size, and mixing the two spaces is what makes clicks land in the wrong place:
+
+- `GetClientRect`/`GetWindowRect`, `ScreenToClient`/`ClientToScreen`,
+  `GetCursorPos`/`SetCursorPos`, `ClipCursor`/`GetClipCursor`, `GetMessagePos`,
+  `GetSystemMetrics` (screen, fullscreen, virtual) and `GetDeviceCaps`
+  (`HORZRES`/`VERTRES`) all report surface-space values for the game window.
+  The pretend world puts that window at the screen origin, so screen and client
+  space coincide for it and both conversions are identities.
+- `WM_MOVE`/`WM_SIZE`/`WM_WINDOWPOSCHANGED` are rewritten to the surface size,
+  because the size in those messages is otherwise the one remaining channel
+  through which the game can cache the real window size and then scale every
+  mouse position by it.
+- Mouse messages queued for the game window carry surface-space `lParam`, and
+  `MSG.pt` is rewritten the same way.
+- Dialogs and their controls are **not** virtualized: they are real windows laid
+  out in real pixels by the window manager, so they keep real coordinates,
+  `GetWindowRect`, `ScreenToClient`, and their own message `lParam`. Routing into
+  them therefore always happens by real geometry (the window manager already did
+  that), which is also why `WH_GETMESSAGE` no longer re-targets messages.
+  `WindowFromPoint` maps the game's surface-space query into real pixels before
+  hit-testing the game's own window tree.
+
+When the client area already equals the surface size the whole layer is inert:
+`logical_mode()` returns `None` and every hook passes straight through.
+
 Every host run also logs two input probes, which answer "where does the click
 actually go?" without guessing:
 

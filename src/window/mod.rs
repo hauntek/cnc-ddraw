@@ -13,10 +13,11 @@ pub mod overlay;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::WM_SIZE;
 
 pub(crate) use crate::win32::geometry::{client_rect, is_window};
-use crate::win32::hwnd::{kill_timer, post_message_w, set_timer};
+use crate::win32::hwnd::{kill_timer, post_message, post_message_w, set_timer};
 use crate::win32::{current_thread_id, AtomicHwnd};
 pub use host::{HostWindow, PresentationMode};
 pub use overlay::OverlayWindow;
@@ -139,6 +140,31 @@ pub fn sync_presented_size(width: u32, height: u32) {
             MODE_ACTIVE.store(true, Ordering::Relaxed);
         }
     }
+}
+
+/// Re-posts a virtualized `WM_SIZE` carrying the surface size to the bound window.
+///
+/// The window is resized while it is still being set up, before the primary surface size is
+/// known, so `WM_SIZE` can leak the real client size exactly once. A game that caches it would
+/// scale every mouse position by it for the rest of the run, so the last size it sees must be the
+/// one it is supposed to believe in.
+pub fn notify_logical_size() {
+    let Some((hwnd, w, h, _)) = logical_mode() else {
+        return;
+    };
+    let Ok(real) = client_rect(hwnd) else {
+        return;
+    };
+    if real.right == w as i32 && real.bottom == h as i32 {
+        return;
+    }
+    // `SIZE_RESTORED` is zero.
+    let _ = post_message(
+        hwnd,
+        WM_SIZE,
+        WPARAM(0),
+        LPARAM((((h & 0xffff) << 16) | (w & 0xffff)) as isize),
+    );
 }
 
 pub fn set_scaling_active(bind_id: usize, active: bool) {

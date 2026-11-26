@@ -598,7 +598,16 @@ impl IDirectDraw_Impl for Draw_Impl {
         let cfg = config::get();
         let _transition = WindowTransitionGuard::acquire(&self.changing_window)?;
         let mut display = self.display.lock();
-        if self.exclusive.load(Ordering::Acquire) && !hwnd.is_invalid() {
+        // Publish the logical size *before* the window is resized: the resize below sends
+        // `WM_SIZE`/`WM_WINDOWPOSCHANGED` with the real client size, and a game that caches those
+        // would keep scaling its mouse maths by the real window size forever after.
+        let scaling = self.exclusive.load(Ordering::Acquire) && !hwnd.is_invalid();
+        if scaling {
+            // `set_scaling_active` clears the mode flag, so arm scaling first and re-arm the mode.
+            window::set_scaling_active(self.bind_id.load(Ordering::Acquire), true);
+        }
+        window::set_mode(width, height, bpp, true);
+        if scaling {
             if self.manage_window.load(Ordering::Acquire) && display.presentation.host.is_none() {
                 let mode = if cfg.windowed {
                     PresentationMode::Windowed
@@ -615,6 +624,9 @@ impl IDirectDraw_Impl for Draw_Impl {
         (display.width, display.height, display.bpp) = (width, height, bpp);
         self.display.store_mode(width, height, bpp);
         window::set_mode(width, height, bpp, true);
+        // The window was already resized before this mode became known, so the game may have seen
+        // the real client size once. Make the surface size the last `WM_SIZE` it observes.
+        window::notify_logical_size();
         if let Some(renderer) = display.presentation.renderer.as_mut() {
             renderer.sync_overlay();
         }

@@ -142,17 +142,17 @@ pub(crate) fn is_related_dialog_window(bound: HWND, hwnd: HWND) -> bool {
     false
 }
 
-fn hit_test_tree(bound: HWND, root: HWND, lx: i32, ly: i32) -> Option<HWND> {
+fn hit_test_tree(bound: HWND, root: HWND, px: i32, py: i32) -> Option<HWND> {
     if !is_visible(root) || (style(root) as u32) & WS_DISABLED.0 != 0 {
         return None;
     }
     let rc = window_rect_in_bound(bound, root)?;
-    if lx < rc.left || lx >= rc.right || ly < rc.top || ly >= rc.bottom {
+    if px < rc.left || px >= rc.right || py < rc.top || py >= rc.bottom {
         return None;
     }
     // Descend top-to-bottom through child controls first so controls win over dialog background.
     for child in children(root) {
-        if let Some(hit) = hit_test_tree(bound, child, lx, ly) {
+        if let Some(hit) = hit_test_tree(bound, child, px, py) {
             return Some(hit);
         }
     }
@@ -162,7 +162,12 @@ fn hit_test_tree(bound: HWND, root: HWND, lx: i32, ly: i32) -> Option<HWND> {
     Some(root)
 }
 
-pub(crate) fn hit_test_logical_child(bound: HWND, lx: i32, ly: i32) -> Option<HWND> {
+/// Hit-tests the game's own window tree at a point given in *real* client pixels of `bound`.
+///
+/// Callers that work in the game's logical space must map through `logical_to_client` first:
+/// dialogs and their controls are real windows, so mixing the two spaces silently routes input to
+/// the wrong window (and offsets it by the scale factor) at every non-native resolution.
+pub(crate) fn hit_test_real_child(bound: HWND, px: i32, py: i32) -> Option<HWND> {
     let tid = bound_thread_id();
     if tid != 0 {
         let mut popups = Vec::new();
@@ -173,13 +178,13 @@ pub(crate) fn hit_test_logical_child(bound: HWND, lx: i32, ly: i32) -> Option<HW
             true
         });
         for dlg in popups {
-            if let Some(hit) = hit_test_tree(bound, dlg, lx, ly) {
+            if let Some(hit) = hit_test_tree(bound, dlg, px, py) {
                 return Some(hit);
             }
         }
     }
     for child in children(bound) {
-        if let Some(hit) = hit_test_tree(bound, child, lx, ly) {
+        if let Some(hit) = hit_test_tree(bound, child, px, py) {
             return Some(hit);
         }
     }
@@ -236,14 +241,17 @@ pub(crate) fn present_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                         py = pt.y;
                     }
                 }
-                let (lx, ly) = client_to_logical(bound, px, py, w, h);
-                let target = hit_test_logical_child(bound, lx, ly).unwrap_or(bound);
-                let target_lparam = if msg == WM_MOUSEWHEEL || target == bound {
+                // The overlay client area covers the game window's real client area one-to-one,
+                // so real children are found by their real geometry; only the game's own window
+                // needs the coordinate space it believes in.
+                let target = hit_test_real_child(bound, px, py).unwrap_or(bound);
+                let target_lparam = if target == bound {
+                    let (lx, ly) = client_to_logical(bound, px, py, w, h);
                     LPARAM(((ly as u16 as u32) << 16 | (lx as u16 as u32)) as isize)
                 } else {
                     let (tx, ty) = client_origin_in_bound(bound, target);
-                    let cx = lx - tx;
-                    let cy = ly - ty;
+                    let cx = px - tx;
+                    let cy = py - ty;
                     LPARAM(((cy as u16 as u32) << 16 | (cx as u16 as u32)) as isize)
                 };
                 let _ = post_message(target, msg, wparam, target_lparam);
