@@ -95,6 +95,7 @@ pub struct FrameSink {
     shutdown_event: HANDLE,
     process: HANDLE,
     first_submit: AtomicBool,
+    test_pattern: bool,
 }
 
 // SAFETY: `FrameSink` owns OS handles and a process-wide mapping. All access is
@@ -231,6 +232,11 @@ impl FrameSink {
             let _ = CloseHandle(process_info.hThread);
         }
 
+        let test_pattern = std::env::var_os("CNC_DDRAW_TEST_PATTERN").is_some();
+        if test_pattern {
+            crate::compat::log_msg("CNC_DDRAW_TEST_PATTERN enabled");
+        }
+
         Ok(Self {
             mapping,
             view,
@@ -240,6 +246,7 @@ impl FrameSink {
             shutdown_event,
             process: process_info.hProcess,
             first_submit: AtomicBool::new(false),
+            test_pattern,
         })
     }
 
@@ -301,17 +308,31 @@ impl FrameSink {
                 .cast::<u8>()
                 .add(protocol::slot_offset(index))
         };
-        for row in 0..height as usize {
-            let offset = row * pitch as usize;
-            // SAFETY: The producer validated pitch * height and both buffers
-            // have at least that many bytes. Rows may overlap only if pitch is
-            // valid; source and destination live in different mappings.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    pixels.as_ptr().add(offset),
-                    destination.add(offset),
-                    pitch as usize,
-                );
+        if self.test_pattern {
+            for row in 0..height as usize {
+                let offset = row * pitch as usize;
+                for col in 0..pitch as usize {
+                    // SAFETY: The slot is `pitch * height` bytes and both
+                    // indexes are inside it.
+                    unsafe {
+                        *destination.add(offset + col) =
+                            ((col.wrapping_mul(13) ^ row.wrapping_mul(7)) & 0xff) as u8;
+                    }
+                }
+            }
+        } else {
+            for row in 0..height as usize {
+                let offset = row * pitch as usize;
+                // SAFETY: The producer validated pitch * height and both buffers
+                // have at least that many bytes. Rows may overlap only if pitch is
+                // valid; source and destination live in different mappings.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        pixels.as_ptr().add(offset),
+                        destination.add(offset),
+                        pitch as usize,
+                    );
+                }
             }
         }
 

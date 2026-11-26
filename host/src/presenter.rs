@@ -3,6 +3,7 @@
 //! them in WGSL, and presents through the 64-bit host overlay window (D3DMetal
 //! on macOS Wine).
 use std::num::NonZeroIsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use raw_window_handle::{Win32WindowHandle, WindowsDisplayHandle};
@@ -173,6 +174,7 @@ pub struct Presenter {
     clear_only: bool,
     logged_frame: bool,
     logged_present: bool,
+    frame_count: u64,
 }
 
 impl Presenter {
@@ -283,6 +285,7 @@ impl Presenter {
             clear_only,
             logged_frame: false,
             logged_present: false,
+            frame_count: 0,
         })
     }
 
@@ -305,6 +308,7 @@ impl Presenter {
             return Err("invalid frame pitch/length".to_string());
         }
 
+        self.frame_count = self.frame_count.wrapping_add(1);
         if !self.logged_frame {
             self.logged_frame = true;
             let total = pitch as usize * height as usize;
@@ -318,6 +322,18 @@ impl Presenter {
                 "first frame: {width}x{height} pitch={pitch} format={format:?} lut_gen={} nonzero={nonzero}/{total} head={head:02x?} mid={mid:02x?} lut0={:?}",
                 header.lut_gen,
                 &header.lut[..4]
+            ));
+        } else if self.frame_count <= 5 || self.frame_count % 120 == 0 {
+            let total = pitch as usize * height as usize;
+            // SAFETY: The producer guarantees pitch * height bytes at `base`.
+            let sample = unsafe { std::slice::from_raw_parts(base, total) };
+            let nonzero = sample.iter().filter(|&&b| b != 0).count();
+            let mid = &sample[(height as usize / 2) * pitch as usize..]
+                [..(pitch as usize).min(32)];
+            logging::log_msg(&format!(
+                "frame #{}: seq={} {width}x{height} format={format:?} nonzero={nonzero}/{total} mid={mid:02x?}",
+                self.frame_count,
+                header.seq.load(Ordering::Acquire),
             ));
         }
 

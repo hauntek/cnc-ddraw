@@ -10,6 +10,7 @@ pub use model::{pixel_format, PixelFormat, SurfaceData, SurfaceSlot};
 
 use std::ffi::c_void;
 use std::mem::{size_of, ManuallyDrop};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
@@ -183,6 +184,12 @@ pub unsafe fn create_surface(
     if count > MAX_BACKBUFFERS {
         return unsupported();
     }
+    if desc.dwFlags & DDSD_LPSURFACE as u32 != 0 && !desc.lpSurface.is_null() {
+        crate::compat::log_msg(&format!(
+            "surface create: custom LPSURFACE primary={primary} {width}x{height} format={format:?} pitch={:?}",
+            descriptor::supplied_pitch(desc)
+        ));
+    }
     if (count > 0) != (caps & DDSCAPS_FLIP as u32 != 0) {
         return Err(DDERR_INVALIDCAPS.into());
     }
@@ -196,6 +203,10 @@ pub unsafe fn create_surface(
     let mut data = SurfaceData::new(width, height, format, mem_caps)?;
     if primary {
         data.caps |= DDSCAPS_VISIBLE as u32;
+        crate::compat::log_msg(&format!(
+            "primary create: {width}x{height} format={format:?} backbuffers={count} lpsurface={}",
+            desc.dwFlags & DDSD_LPSURFACE as u32 != 0 && !desc.lpSurface.is_null()
+        ));
     }
     if desc.dwFlags & DDSD_CKSRCBLT as u32 != 0 {
         data.source_key = Some(desc.ddckCKSrcBlt);
@@ -308,6 +319,14 @@ pub fn matches_desc(surface: &IDirectDrawSurface, filter: &DDSURFACEDESC) -> Res
     Ok(true)
 }
 
+static PRIMARY_TRACE: AtomicUsize = AtomicUsize::new(0);
+
+fn trace_primary(operation: &str) {
+    if PRIMARY_TRACE.fetch_add(1, Ordering::Relaxed) < 30 {
+        crate::compat::log_msg(&format!("primary {operation}"));
+    }
+}
+
 impl Surface {
     fn read(&self) -> Result<MutexGuard<'_, SurfaceData>> {
         Ok(self.data.lock())
@@ -323,6 +342,7 @@ impl Surface {
 
     fn refresh(&self) -> Result<()> {
         if self.is_primary {
+            trace_primary("refresh");
             self.display.request_refresh()?;
         }
         Ok(())
@@ -330,6 +350,7 @@ impl Surface {
 
     fn present_now(&self) -> Result<()> {
         if self.is_primary {
+            trace_primary("present_now");
             self.display.request_present_now()?;
         }
         Ok(())
