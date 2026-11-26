@@ -74,13 +74,29 @@ impl UploadedFrame {
             view_formats: &[],
         });
         let raw_view = raw_texture.create_view(&Default::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("DirectDraw frame sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
         let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("DirectDraw frame bindings"),
             layout: &pipeline.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&raw_view),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&raw_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
         });
         Self {
             raw_texture,
@@ -414,6 +430,13 @@ impl Presenter {
             }
         }
 
+        if self.frame_count <= 5 || self.frame_count % 120 == 0 {
+            logging::log_msg(&format!(
+                "staging #{}: head={:02x?}",
+                self.frame_count,
+                &self.staging[..self.staging.len().min(16)]
+            ));
+        }
         self.queue.write_texture(
             frame.raw_texture.as_image_copy(),
             &self.staging[..needed],
