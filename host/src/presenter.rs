@@ -284,6 +284,7 @@ impl Presenter {
         hinstance: HINSTANCE,
         backend: &str,
         maintas: bool,
+        vsync: bool,
     ) -> Result<Self, String> {
         let mut raw = Win32WindowHandle::new(
             NonZeroIsize::new(hwnd.0 as isize).ok_or("invalid host window")?,
@@ -331,8 +332,22 @@ impl Presenter {
         let mut surface_cfg = surface
             .get_default_config(&adapter, 1, 1)
             .ok_or("no presentation format for the host overlay")?;
-        // Wine DXGI has incomplete Mailbox/Immediate support.
-        surface_cfg.present_mode = wgpu::PresentMode::Fifo;
+        // `vsync = no` in ddraw.ini must actually reach this process: prefer a
+        // mode that does not block on the vertical blank, and fall back to Fifo
+        // when the stack only offers that.
+        let present_mode = if vsync {
+            wgpu::PresentMode::Fifo
+        } else {
+            let caps = surface.get_capabilities(&adapter);
+            [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox]
+                .into_iter()
+                .find(|mode| caps.present_modes.contains(mode))
+                .unwrap_or(wgpu::PresentMode::Fifo)
+        };
+        surface_cfg.present_mode = present_mode;
+        logging::log_msg(&format!(
+            "present mode: {present_mode:?} (vsync={vsync})"
+        ));
         // Never let Wine/D3DMetal composite the desktop through the overlay.
         surface_cfg.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
         // The default present path blits the frame into the swapchain image with

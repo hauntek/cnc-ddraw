@@ -179,6 +179,14 @@ windowed mode.
   to RGBA8 on the CPU (the path used before the integer-texture path was proven
   on D3DMetal).
 
+  `vsync` and `maintas` from `ddraw.ini` are forwarded to the host on its
+  command line (`--vsync`, `--maintas`). With `vsync = no` the host asks for
+  `PresentMode::Immediate` (no vertical-blank wait), falls back to `Mailbox`, and
+  only uses `Fifo` when the stack offers nothing else - the chosen mode is logged
+  as `present mode: ... (vsync=...)`. Note that `maxfps` throttles the 32-bit
+  submit path independently: the host is not the only place a frame cap can come
+  from.
+
   The vertex stage must return `@builtin(position)` directly. A version that
   returned a struct with a `@location(0)` varying produced a draw that D3DMetal
   rendered nothing on D3DMetal: no pixels even with an empty pipeline layout, no

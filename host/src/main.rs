@@ -219,6 +219,7 @@ struct Args {
     pid: u32,
     backend: String,
     maintas: bool,
+    vsync: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -228,6 +229,7 @@ fn parse_args() -> Result<Args, String> {
     let mut pid = None;
     let mut backend = "auto".to_string();
     let mut maintas = true;
+    let mut vsync = true;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -253,6 +255,10 @@ fn parse_args() -> Result<Args, String> {
                 let value = args.next().ok_or("--maintas requires a value")?;
                 maintas = !matches!(value.as_str(), "0" | "false" | "no" | "off");
             }
+            "--vsync" => {
+                let value = args.next().ok_or("--vsync requires a value")?;
+                vsync = !matches!(value.as_str(), "0" | "false" | "no" | "off");
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -263,6 +269,7 @@ fn parse_args() -> Result<Args, String> {
         pid: pid.ok_or("missing --pid")?,
         backend,
         maintas,
+        vsync,
     })
 }
 
@@ -302,6 +309,7 @@ fn run() -> Result<(), String> {
         overlay.hinstance(),
         &args.backend,
         args.maintas,
+        args.vsync,
     )?;
     // After the swapchain exists, make sure the overlay can never swallow a
     // click meant for the game window underneath it. Set

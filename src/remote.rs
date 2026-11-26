@@ -177,14 +177,16 @@ impl FrameSink {
             .chain(std::iter::once(0))
             .collect();
         let maintas = u8::from(config::get().maintas);
+        let vsync = u8::from(config::get().vsync);
         let command = format!(
-            "\"{}\" --base {} --hwnd {:x} --pid {} --backend {} --maintas {}",
+            "\"{}\" --base {} --hwnd {:x} --pid {} --backend {} --maintas {} --vsync {}",
             host.display(),
             base,
             hwnd.0 as usize,
             pid,
             backend_name(),
-            maintas
+            maintas,
+            vsync
         );
         let mut command: Vec<u16> = command
             .encode_utf16()
