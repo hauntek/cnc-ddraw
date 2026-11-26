@@ -25,6 +25,19 @@ jobs:
           rustup target add i686-pc-windows-gnullvm
           rustup component add rustfmt clippy
 
+      - name: Install llvm-mingw
+        shell: pwsh
+        run: |
+          $version = "20240606"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/llvm-mingw-$version-ucrt-x86_64.zip"
+          $zip = "llvm-mingw.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "C:\"
+          $llvmMingwDir = Get-ChildItem "C:\" -Directory -Filter "llvm-mingw*" | Select-Object -First 1
+          echo "$($llvmMingwDir.FullName)\bin" >> $env:GITHUB_PATH
+          # 立即将路径加入当前会话，供后续步骤使用
+          $env:PATH = "$($llvmMingwDir.FullName)\bin;$env:PATH"
+
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
