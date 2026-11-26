@@ -317,6 +317,15 @@ fn run() -> Result<(), String> {
 
     let mut last_seq = 0u32;
     let mut have_frame = false;
+    // Present only when the picture would actually change. Presenting every loop
+    // iteration would redraw the same texture at the display refresh rate while
+    // the game produces far fewer frames, and each of those presents blocks on
+    // the vsync interval inside `Present`.
+    let mut presented_seq: Option<u32> = None;
+    let mut presented_rect: Option<(i32, i32, i32, i32)> = None;
+    // Escape hatch: present on every loop iteration again, in case a driver needs
+    // the swapchain poked continuously to keep the window contents alive.
+    let present_always = std::env::var_os("CNC_DDRAW_HOST_PRESENT_ALWAYS").is_some();
     let mut probe = InputProbe::default();
 
     // `CNC_DDRAW_HOST_TIMING=1` reports where the host actually spends time.
@@ -373,26 +382,39 @@ fn run() -> Result<(), String> {
         }
 
         if have_frame && overlay::game_visible(game) {
-            if let Some((x, y, width, height)) = overlay::client_screen_rect(game) {
+            if let Some(rect) = overlay::client_screen_rect(game) {
+                let (x, y, width, height) = rect;
                 overlay.show_at(x, y, width, height);
-                let started = std::time::Instant::now();
-                let result = presenter.present(width as u32, height as u32);
-                present_ns += started.elapsed().as_nanos() as u64;
-                window_presents += 1;
-                match result {
-                    Ok(()) => {
-                        // SAFETY: The event handle is valid for the process lifetime.
-                        unsafe {
-                            let _ = SetEvent(presented_event);
+                // A new frame, a moved or resized overlay, or a swapchain that
+                // was just reconfigured all require a fresh present; anything
+                // else would redraw the exact same picture.
+                let changed = present_always
+                    || presented_seq != Some(last_seq)
+                    || presented_rect != Some(rect);
+                if changed {
+                    let started = std::time::Instant::now();
+                    let result = presenter.present(width as u32, height as u32);
+                    present_ns += started.elapsed().as_nanos() as u64;
+                    window_presents += 1;
+                    match result {
+                        Ok(()) => {
+                            presented_seq = Some(last_seq);
+                            presented_rect = Some(rect);
+                            // SAFETY: The event handle is valid for the process lifetime.
+                            unsafe {
+                                let _ = SetEvent(presented_event);
+                            }
                         }
+                        Err(err) => logging::log_msg(&format!("present failed: {err}")),
                     }
-                    Err(err) => logging::log_msg(&format!("present failed: {err}")),
                 }
             } else {
                 overlay.hide();
+                presented_rect = None;
             }
         } else {
             overlay.hide();
+            presented_rect = None;
         }
 
         window_loops += 1;

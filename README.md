@@ -171,11 +171,13 @@ windowed mode.
   sampler binding: naga's HLSL backend turns a sampler into a sampler-heap
   resource array that D3DMetal's FXC rejects with `E5017`.
 
-  `CNC_DDRAW_HOST_RAW=1` additionally moves the format conversion to the GPU:
-  the surface is uploaded as `R8Uint`/`R16Uint`/`R32Uint` and `host/src/raw.wgsl`
-  unpacks RGB555/RGB565/XRGB, applies the 256x1 palette/gamma table and picks the
-  texel, exactly like the original in-process renderer. The CPU then only forwards
-  `pitch * height` bytes per frame.
+  The **default** upload is the raw surface itself: `R8Uint`/`R16Uint`/`R32Uint`
+  and `host/src/raw.wgsl` unpacks RGB555/RGB565/XRGB, applies the 256x1
+  palette/gamma table and picks the texel, exactly like the original in-process
+  renderer. The CPU then only forwards `pitch * height` bytes per frame and never
+  touches a pixel. `CNC_DDRAW_HOST_RGBA=1` switches back to converting the frame
+  to RGBA8 on the CPU (the path used before the integer-texture path was proven
+  on D3DMetal).
 
   The vertex stage must return `@builtin(position)` directly. A version that
   returned a struct with a `@location(0)` varying produced a draw that D3DMetal
@@ -193,13 +195,14 @@ path, which is the default - `CNC_DDRAW_HOST_BLIT=1` disables them):
 | Variable | Effect |
 | --- | --- |
 | `CNC_DDRAW_HOST_BLIT=1` | Use the CPU nearest-neighbour upscale plus `copy_texture_to_texture` instead of the render pipeline |
-| `CNC_DDRAW_HOST_RAW=1` | Upload the raw surface bytes and let `host/src/raw.wgsl` unpack the format and apply the LUT, so the CPU never touches a pixel |
+| `CNC_DDRAW_HOST_RGBA=1` | Fallback: convert the frame to RGBA8 on the CPU and upload that, instead of letting the shader unpack the raw surface |
 | `CNC_DDRAW_HOST_CLEAR=red\|green\|blue\|white\|magenta\|0xRRGGBB` | Clear the swapchain and skip drawing |
 | `CNC_DDRAW_HOST_SOLID_DRAW=1` | GPU path: draw a fullscreen red triangle with no bindings |
 | `CNC_DDRAW_HOST_SOLID=1` | Upload an all-red RGBA frame instead of the game frame |
 | `CNC_DDRAW_HOST_CONST_FS=1` | GPU path: frame pipeline, but a constant green fragment shader |
 | `CNC_DDRAW_HOST_CONST_NOBIND=1` | GPU path: same vertex shader and constant green fragment, but an **empty** pipeline layout and no bind group |
 | `CNC_DDRAW_HOST_FULL_VIEWPORT=1` | Stretch the frame over the whole target |
+| `CNC_DDRAW_HOST_PRESENT_ALWAYS=1` | Present every loop iteration instead of only when the picture changed |
 | `CNC_DDRAW_HOST_TIMING=1` | Log `timing: ...` every 2 s with loop/upload/present rates and average CPU cost |
 | `CNC_DDRAW_HOST_INPUT_BRIDGE=1` | Poll the real mouse and post synthetic button messages to the game window |
 | `CNC_DDRAW_HOST_OVERLAY_INPUT=1` | Keep the overlay window enabled and rely on input forwarding only |
@@ -293,12 +296,14 @@ COM class factories.
 - If the host exits, the 32-bit side logs the failure and retries on the next
   present tick; on native Windows it can still fall back to the in-process
   renderer.
-- The default host present path is the GPU render pipeline: the CPU converts the
-  raw surface to RGBA8 (one pass over the 800x600 frame) and uploads it, and the
-  fragment shader turns destination pixels into texel lookups. `CNC_DDRAW_HOST_BLIT=1`
-  switches to a CPU nearest-neighbour upscale plus `copy_texture_to_texture`,
-  which needs no pipeline and exists as a fallback for stacks where the
-  pipeline path fails.
+- The default host present path is the GPU render pipeline over the raw surface
+  bytes: the CPU only copies `pitch * height` into the upload buffer, and the
+  fragment shader unpacks the pixel format, applies the LUT and selects the
+  texel. A present is only submitted when a new frame arrived or the overlay
+  moved/resized, so the host does not redraw the same picture at the display
+  refresh rate. `CNC_DDRAW_HOST_BLIT=1` switches to a CPU nearest-neighbour
+  upscale plus `copy_texture_to_texture`, which needs no pipeline and exists as a
+  fallback for stacks where the pipeline path fails.
 - Frame output is nearest-neighbour scaled (the shader indexes exact texels), so
   non-integer scale factors (e.g. 800x600 to 1440x1080) show slightly hard pixel
   edges.

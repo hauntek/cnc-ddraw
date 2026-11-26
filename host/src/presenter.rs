@@ -447,10 +447,10 @@ impl Presenter {
         // the CPU nearest-neighbour upscale plus `copy_texture_to_texture`, which
         // needs no pipeline at all.
         let blit = std::env::var_os("CNC_DDRAW_HOST_BLIT").is_some();
-        // Experimental: upload raw surface bytes and let the shader unpack them,
-        // so the CPU never touches a pixel. Off by default until it has proven
-        // itself on every stack the pipeline path runs on.
-        let raw = std::env::var_os("CNC_DDRAW_HOST_RAW").is_some();
+        // Default: upload the raw surface bytes and let the shader unpack them,
+        // so the CPU never touches a pixel. `CNC_DDRAW_HOST_RGBA=1` falls back
+        // to converting the frame to RGBA8 on the CPU and uploading that.
+        let raw = std::env::var_os("CNC_DDRAW_HOST_RGBA").is_none();
         logging::log_msg(&format!(
             "presenter init: format={:?} blit={blit} raw={raw} clear_only={clear_only} solid={solid} solid_draw={solid_draw} const_fs={const_fs} const_nobind={const_nobind} full_viewport={full_viewport}",
             surface_cfg.format
