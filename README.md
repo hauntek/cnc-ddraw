@@ -152,29 +152,43 @@ windowed mode.
   not instantiate it.
 - `host/src/presenter.rs` is the 64-bit wgpu DX12 presenter. The 32-bit side
   converts the raw primary surface (indexed/RGB555/RGB565/XRGB) to tightly
-  packed RGBA8 using the palette LUT, the host uploads it as a single
-  `Rgba8Unorm` texture, and `host/src/present.wgsl` samples it with
-  `textureLoad` from `@builtin(position)`. There is deliberately no sampler
-  binding: naga's HLSL backend turns a sampler into a sampler-heap resource
-  array that D3DMetal's FXC rejects with `E5017`. Texture size and viewport
-  origin come from a small uniform buffer, so the shader never calls
-  `textureDimensions()`.
+  packed RGBA8 using the palette LUT.
+
+  The **default** present path is a CPU blit: the host nearest-neighbour
+  upscales that RGBA8 frame to the letterboxed viewport, writes it into a
+  `Bgra8Unorm` texture and `copy_texture_to_texture`s it into the swapchain
+  image. It uses no render pipeline, shader, bind group or sampler, because on
+  wgpu 27 / DX12 / D3DMetal a draw through a pipeline that declares a bind
+  group produces no pixels at all - even when the fragment shader ignores the
+  bound resources (`CNC_DDRAW_HOST_CONST_FS` returns a constant green and still
+  renders nothing), while the same fullscreen triangle drawn with an empty
+  pipeline layout works.
+
+  `CNC_DDRAW_HOST_GPU=1` selects the textured render-pipeline path instead:
+  `host/src/present.wgsl` samples an `Rgba8Unorm` frame with `textureLoad` from
+  `@builtin(position)`, with texture size and viewport origin in a small uniform
+  buffer, so it never calls `textureDimensions()`. There is deliberately no
+  sampler binding: naga's HLSL backend turns a sampler into a sampler-heap
+  resource array that D3DMetal's FXC rejects with `E5017`.
 
 Host-only presentation diagnostics (set in the environment of
-`ddraw-host.exe`, all off by default):
+`ddraw-host.exe`, all off by default; the drawing ones need
+`CNC_DDRAW_HOST_GPU=1`):
 
 | Variable | Effect |
 | --- | --- |
+| `CNC_DDRAW_HOST_GPU=1` | Use the textured render-pipeline path instead of the CPU blit |
 | `CNC_DDRAW_HOST_CLEAR=red\|green\|blue\|white\|magenta\|0xRRGGBB` | Clear the swapchain and skip drawing |
-| `CNC_DDRAW_HOST_SOLID_DRAW=1` | Draw a fullscreen red triangle with no bindings |
-| `CNC_DDRAW_HOST_SOLID=1` | Upload an all-red RGBA texture instead of the frame |
-| `CNC_DDRAW_HOST_CONST_FS=1` | Use the frame pipeline but a constant green fragment shader |
-| `CNC_DDRAW_HOST_POSITION_UV=1` | Sample from the interpolated vertex UV instead of `@builtin(position)` |
+| `CNC_DDRAW_HOST_SOLID_DRAW=1` | GPU path: draw a fullscreen red triangle with no bindings |
+| `CNC_DDRAW_HOST_SOLID=1` | Upload an all-red RGBA frame instead of the game frame |
+| `CNC_DDRAW_HOST_CONST_FS=1` | GPU path: frame pipeline, but a constant green fragment shader |
+| `CNC_DDRAW_HOST_CONST_NOBIND=1` | GPU path: same vertex shader and constant green fragment, but an **empty** pipeline layout and no bind group |
+| `CNC_DDRAW_HOST_POSITION_UV=1` | GPU path: sample from the interpolated vertex UV |
 | `CNC_DDRAW_HOST_FULL_VIEWPORT=1` | Stretch the frame over the whole target |
 
-On the first present the host also copies the first texture row back and logs
-`gpu row0: ...`, which distinguishes "upload never reached the GPU" from
-"draw/sample path broken".
+On the first GPU-path present the host also copies the first texture row back
+and logs `gpu row0: ...`, which distinguishes "upload never reached the GPU"
+from "draw/sample path broken".
 - `host/src/overlay.rs` owns the 64-bit click-through overlay window. It is
   `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT`, answers
   `WM_NCHITTEST` with `HTTRANSPARENT`, and is hidden when the game is

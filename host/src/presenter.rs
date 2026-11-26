@@ -151,9 +151,22 @@ pub struct Presenter {
     pipeline: wgpu::RenderPipeline,
     uv_pipeline: wgpu::RenderPipeline,
     const_pipeline: wgpu::RenderPipeline,
+    /// `fs_const` driven through an empty pipeline layout (no bind group at all).
+    const_nobind_pipeline: wgpu::RenderPipeline,
     solid_pipeline: wgpu::RenderPipeline,
     frame: Option<UploadedFrame>,
     staging: Vec<u8>,
+    frame_dims: (u32, u32),
+    /// CPU nearest-neighbour upscale of the frame, already in the target's
+    /// channel order (`Bgra8`).
+    scaled: Vec<u8>,
+    /// Destination-x -> source-x lookup for the current viewport.
+    xmap: Vec<u32>,
+    /// Target-sized region uploaded by the blit path.
+    blit_texture: Option<wgpu::Texture>,
+    blit: bool,
+    /// A new frame has been staged and the blit source must be rebuilt.
+    dirty: bool,
     maintas: bool,
     clear_color: wgpu::Color,
     clear_only: bool,
@@ -161,6 +174,7 @@ pub struct Presenter {
     solid_draw: bool,
     position_uv: bool,
     const_fs: bool,
+    const_nobind: bool,
     full_viewport: bool,
     logged_frame: bool,
     logged_present: bool,
@@ -226,6 +240,10 @@ impl Presenter {
         surface_cfg.present_mode = wgpu::PresentMode::Fifo;
         // Never let Wine/D3DMetal composite the desktop through the overlay.
         surface_cfg.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
+        // The default present path blits the frame into the swapchain image with
+        // a texture copy, so it must be a copy destination.
+        surface_cfg.usage =
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST;
 
         // One explicit layout shared by every pipeline. Pipeline-derived
         // ("exclusive") layouts are not interchangeable in wgpu 27, which is
@@ -235,6 +253,14 @@ impl Presenter {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DirectDraw pipeline layout"),
             bind_group_layouts: &[&frame_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Layout with no bind groups at all: used by the two diagnostics that
+        // must draw without any descriptor binding.
+        let empty_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("DirectDraw empty layout"),
+            bind_group_layouts: &[],
             push_constant_ranges: &[],
         });
 
@@ -268,22 +294,39 @@ impl Presenter {
         let pipeline = make_pipeline("DirectDraw presentation", "fs");
         let uv_pipeline = make_pipeline("DirectDraw uv diagnostic", "fs_uv");
         let const_pipeline = make_pipeline("DirectDraw const diagnostic", "fs_const");
+        let const_nobind_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("DirectDraw const no-bind diagnostic"),
+                layout: Some(&empty_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_const"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(surface_cfg.format.into())],
+                }),
+                multiview: None,
+                cache: None,
+            });
 
         let solid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("DirectDraw solid diagnostic"),
             source: wgpu::ShaderSource::Wgsl(include_str!("solid.wgsl").into()),
         });
-        // Empty layout: this path deliberately draws without any bind group, so
-        // it must not declare bind group 0 (wgpu rejects a draw that leaves a
-        // declared group unset).
-        let solid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("DirectDraw solid layout"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
+        // This path deliberately draws without any bind group, so it must not
+        // declare bind group 0 (wgpu rejects a draw that leaves a declared
+        // group unset).
         let solid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("DirectDraw solid diagnostic"),
-            layout: Some(&solid_layout),
+            layout: Some(&empty_layout),
             vertex: wgpu::VertexState {
                 module: &solid_shader,
                 entry_point: Some("vs"),
@@ -309,9 +352,16 @@ impl Presenter {
         let solid_draw = std::env::var_os("CNC_DDRAW_HOST_SOLID_DRAW").is_some();
         let position_uv = std::env::var_os("CNC_DDRAW_HOST_POSITION_UV").is_some();
         let const_fs = std::env::var_os("CNC_DDRAW_HOST_CONST_FS").is_some();
+        let const_nobind = std::env::var_os("CNC_DDRAW_HOST_CONST_NOBIND").is_some();
         let full_viewport = std::env::var_os("CNC_DDRAW_HOST_FULL_VIEWPORT").is_some();
+        // Default to the copy path: on wgpu-DX12/D3DMetal a draw through a
+        // pipeline that declares a bind group produces no pixels at all, even
+        // when the fragment shader ignores the bound resources. `CNC_DDRAW_HOST_GPU=1`
+        // re-enables the textured render-pipeline path for platforms where it
+        // works.
+        let blit = std::env::var_os("CNC_DDRAW_HOST_GPU").is_none();
         logging::log_msg(&format!(
-            "presenter init: format={:?} clear_only={clear_only} solid={solid} solid_draw={solid_draw} position_uv={position_uv} const_fs={const_fs} full_viewport={full_viewport}",
+            "presenter init: format={:?} blit={blit} clear_only={clear_only} solid={solid} solid_draw={solid_draw} position_uv={position_uv} const_fs={const_fs} const_nobind={const_nobind} full_viewport={full_viewport}",
             surface_cfg.format
         ));
 
@@ -325,9 +375,16 @@ impl Presenter {
             pipeline,
             uv_pipeline,
             const_pipeline,
+            const_nobind_pipeline,
             solid_pipeline,
             frame: None,
             staging: Vec::new(),
+            frame_dims: (0, 0),
+            scaled: Vec::new(),
+            xmap: Vec::new(),
+            blit_texture: None,
+            blit,
+            dirty: false,
             maintas,
             clear_color,
             clear_only,
@@ -335,6 +392,7 @@ impl Presenter {
             solid_draw,
             position_uv,
             const_fs,
+            const_nobind,
             full_viewport,
             logged_frame: false,
             logged_present: false,
@@ -399,17 +457,24 @@ impl Presenter {
             height,
             depth_or_array_layers: 1,
         };
-        if self
-            .frame
-            .as_ref()
-            .is_some_and(|frame| frame.raw_texture.size() != size)
-        {
+        self.frame_dims = (width, height);
+        self.dirty = true;
+        if self.blit {
+            // The copy path scales on the CPU and never needs a GPU frame
+            // texture.
             self.frame = None;
+        } else {
+            if self
+                .frame
+                .as_ref()
+                .is_some_and(|frame| frame.raw_texture.size() != size)
+            {
+                self.frame = None;
+            }
+            if self.frame.is_none() {
+                self.frame = Some(UploadedFrame::new(&self.device, &self.frame_layout, size));
+            }
         }
-        if self.frame.is_none() {
-            self.frame = Some(UploadedFrame::new(&self.device, &self.frame_layout, size));
-        }
-        let frame = self.frame.as_ref().expect("frame was just created");
 
         // Match the original in-process renderer: queue.write_texture accepts
         // a tightly packed row stride (the original passes the DirectDraw pitch
@@ -493,16 +558,19 @@ impl Presenter {
                 &self.staging[..self.staging.len().min(16)]
             ));
         }
-        self.queue.write_texture(
-            frame.raw_texture.as_image_copy(),
-            &self.staging[..needed],
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(out_pitch as u32),
-                rows_per_image: None,
-            },
-            size,
-        );
+        if !self.blit {
+            let frame = self.frame.as_ref().expect("frame was just created");
+            self.queue.write_texture(
+                frame.raw_texture.as_image_copy(),
+                &self.staging[..needed],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(out_pitch as u32),
+                    rows_per_image: None,
+                },
+                size,
+            );
+        }
         Ok(())
     }
 
@@ -536,8 +604,12 @@ impl Presenter {
         };
         self.configured = !output.suboptimal;
 
+        if self.blit {
+            return self.present_blit(output, target_w, target_h);
+        }
+
         let frame = self.frame.as_ref();
-        if !self.clear_only && !self.solid_draw && frame.is_none() {
+        if !self.clear_only && !self.solid_draw && !self.const_nobind && frame.is_none() {
             return Ok(());
         }
         if !self.logged_present {
@@ -591,6 +663,9 @@ impl Presenter {
             } else if self.solid_draw {
                 pass.set_pipeline(&self.solid_pipeline);
                 pass.draw(0..3, 0..1);
+            } else if self.const_nobind {
+                pass.set_pipeline(&self.const_nobind_pipeline);
+                pass.draw(0..3, 0..1);
             } else if let Some(frame) = frame {
                 let selected = if self.const_fs {
                     &self.const_pipeline
@@ -616,10 +691,179 @@ impl Presenter {
         Ok(())
     }
 
-    /// One-shot diagnostic: copy the first texture row back to the CPU and log
-    /// it. If `gpu row0` matches the staged bytes, the upload is fine and the
-    /// problem is in the draw/sample path; if it is all zeroes, the texture
-    /// never received the frame.
+    /// Portable present path.
+    ///
+    /// The frame is upscaled on the CPU and copied into the swapchain image
+    /// with a plain texture copy. No render pipeline, shader, bind group,
+    /// sampler or viewport is involved, only `write_texture` and
+    /// `copy_texture_to_texture` - the two operations the readback probe has
+    /// already proven to work on this stack.
+    fn present_blit(
+        &mut self,
+        output: wgpu::SurfaceTexture,
+        target_w: u32,
+        target_h: u32,
+    ) -> Result<(), String> {
+        let (fw, fh) = self.frame_dims;
+        if !self.clear_only && (fw == 0 || fh == 0) {
+            return Ok(());
+        }
+        let (vx, vy, vw, vh) = if self.full_viewport || self.clear_only {
+            (0, 0, target_w.max(1), target_h.max(1))
+        } else {
+            compute_viewport(fw, fh, target_w, target_h, self.maintas)
+        };
+        if !self.logged_present {
+            self.logged_present = true;
+            logging::log_msg(&format!(
+                "first present (blit): target={target_w}x{target_h} frame={fw}x{fh} viewport={vx},{vy},{vw},{vh} format={:?}",
+                self.config.format
+            ));
+        }
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            // Deterministic letterbox bars.
+            let view = output.texture.create_view(&Default::default());
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("DirectDraw blit clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+        }
+
+        if !self.clear_only {
+            let stride = (vw as usize * 4).div_ceil(256) * 256;
+            let size = wgpu::Extent3d {
+                width: vw,
+                height: vh,
+                depth_or_array_layers: 1,
+            };
+            // `present` runs every few milliseconds while the game may only
+            // produce 15-30 frames per second, so only rescale and re-upload
+            // when a new frame (or a new viewport size) actually arrived.
+            let stale = self.dirty
+                || !self
+                    .blit_texture
+                    .as_ref()
+                    .is_some_and(|texture| texture.size() == size);
+            if stale {
+                let bgra = self.config.format.remove_srgb_suffix()
+                    == wgpu::TextureFormat::Bgra8Unorm;
+                self.build_scaled(fw, fh, vw, vh, bgra);
+                if !self
+                    .blit_texture
+                    .as_ref()
+                    .is_some_and(|texture| texture.size() == size)
+                {
+                    self.blit_texture =
+                        Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("DirectDraw blit source"),
+                            size,
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            // Match the swapchain's real (non-sRGB) DXGI
+                            // resource so the copy needs no format conversion.
+                            format: self.config.format.remove_srgb_suffix(),
+                            usage: wgpu::TextureUsages::COPY_DST
+                                | wgpu::TextureUsages::COPY_SRC,
+                            view_formats: &[],
+                        }));
+                }
+                let blit_texture = self.blit_texture.as_ref().expect("blit texture");
+                self.queue.write_texture(
+                    blit_texture.as_image_copy(),
+                    &self.scaled[..stride * vh as usize],
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(stride as u32),
+                        rows_per_image: None,
+                    },
+                    size,
+                );
+                self.dirty = false;
+            }
+            let blit_texture = self.blit_texture.as_ref().expect("blit texture");
+            encoder.copy_texture_to_texture(
+                blit_texture.as_image_copy(),
+                wgpu::TexelCopyTextureInfo {
+                    texture: &output.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: vx,
+                        y: vy,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                size,
+            );
+        }
+
+        self.queue.submit([encoder.finish()]);
+        output.present();
+        self.present_count = self.present_count.wrapping_add(1);
+        if self.present_count % 120 == 0 {
+            logging::log_msg(&format!(
+                "present #{}: target={target_w}x{target_h} (blit)",
+                self.present_count
+            ));
+        }
+        Ok(())
+    }
+
+    /// Nearest-neighbour upscale of the staged RGBA frame into the target
+    /// region, writing the swapchain's channel order.
+    fn build_scaled(&mut self, fw: u32, fh: u32, vw: u32, vh: u32, bgra: bool) {
+        let sw = fw as usize;
+        let sh = fh as usize;
+        let dw = vw as usize;
+        let dh = vh as usize;
+        if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+            return;
+        }
+        let stride = (dw * 4).div_ceil(256) * 256;
+        let needed = stride * dh;
+        if self.scaled.len() < needed {
+            self.scaled.resize(needed, 0);
+        }
+        if self.xmap.len() != dw {
+            self.xmap.resize(dw, 0);
+        }
+        for (dx, slot) in self.xmap.iter_mut().enumerate() {
+            *slot = ((dx as u64 * sw as u64) / dw as u64) as u32;
+        }
+
+        for dy in 0..dh {
+            let sy = ((dy as u64 * sh as u64) / dh as u64) as usize;
+            let src_row = &self.staging[sy * sw * 4..(sy + 1) * sw * 4];
+            let dst_row = &mut self.scaled[dy * stride..dy * stride + dw * 4];
+            for (dx, slot) in dst_row.chunks_exact_mut(4).enumerate() {
+                let sx = self.xmap[dx] as usize * 4;
+                let pixel = &src_row[sx..sx + 4];
+                if bgra {
+                    slot[0] = pixel[2];
+                    slot[1] = pixel[1];
+                    slot[2] = pixel[0];
+                } else {
+                    slot[0] = pixel[0];
+                    slot[1] = pixel[1];
+                    slot[2] = pixel[2];
+                }
+                slot[3] = 255;
+            }
+        }
+    }
+
     fn readback_probe(&self, frame: &UploadedFrame) {
         let width = frame.raw_texture.width().max(1);
         let row_bytes = width.saturating_mul(4).max(4);
