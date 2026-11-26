@@ -114,15 +114,19 @@ pub struct Presenter {
     config: wgpu::SurfaceConfiguration,
     configured: bool,
     pipeline: wgpu::RenderPipeline,
+    solid_pipeline: wgpu::RenderPipeline,
     frame: Option<UploadedFrame>,
     staging: Vec<u8>,
     maintas: bool,
     clear_color: wgpu::Color,
     clear_only: bool,
     solid: bool,
+    solid_draw: bool,
+    full_viewport: bool,
     logged_frame: bool,
     logged_present: bool,
     frame_count: u64,
+    present_count: u64,
 }
 
 impl Presenter {
@@ -209,11 +213,39 @@ impl Presenter {
             cache: None,
         });
 
+        let solid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("DirectDraw solid diagnostic"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("solid.wgsl").into()),
+        });
+        let solid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("DirectDraw solid diagnostic"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &solid_shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &solid_shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(surface_cfg.format.into())],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let clear_color = debug_clear().unwrap_or(wgpu::Color::BLACK);
         let clear_only = std::env::var_os("CNC_DDRAW_HOST_CLEAR").is_some();
         let solid = std::env::var_os("CNC_DDRAW_HOST_SOLID").is_some();
+        let solid_draw = std::env::var_os("CNC_DDRAW_HOST_SOLID_DRAW").is_some();
+        let full_viewport = std::env::var_os("CNC_DDRAW_HOST_FULL_VIEWPORT").is_some();
         logging::log_msg(&format!(
-            "presenter init: format={:?} clear_only={clear_only} solid={solid}",
+            "presenter init: format={:?} clear_only={clear_only} solid={solid} solid_draw={solid_draw} full_viewport={full_viewport}",
             surface_cfg.format
         ));
 
@@ -224,15 +256,19 @@ impl Presenter {
             config: surface_cfg,
             configured: false,
             pipeline,
+            solid_pipeline,
             frame: None,
             staging: Vec::new(),
             maintas,
             clear_color,
             clear_only,
             solid,
+            solid_draw,
+            full_viewport,
             logged_frame: false,
             logged_present: false,
             frame_count: 0,
+            present_count: 0,
         })
     }
 
@@ -424,7 +460,7 @@ impl Presenter {
         self.configured = !output.suboptimal;
 
         let frame = self.frame.as_ref();
-        if !self.clear_only && frame.is_none() {
+        if !self.clear_only && !self.solid_draw && frame.is_none() {
             return Ok(());
         }
         if !self.logged_present {
@@ -450,17 +486,26 @@ impl Presenter {
                 })],
                 ..Default::default()
             });
-            if let Some(frame) = frame {
+            let (vx, vy, vw, vh) = if self.full_viewport {
+                (0, 0, target_w.max(1), target_h.max(1))
+            } else if let Some(frame) = frame {
                 let frame_size = frame.raw_texture.size();
-                let (vx, vy, vw, vh) = compute_viewport(
+                compute_viewport(
                     frame_size.width,
                     frame_size.height,
                     target_w,
                     target_h,
                     self.maintas,
-                );
-                pass.set_viewport(vx as f32, vy as f32, vw as f32, vh as f32, 0.0, 1.0);
-                pass.set_scissor_rect(vx, vy, vw, vh);
+                )
+            } else {
+                (0, 0, target_w.max(1), target_h.max(1))
+            };
+            pass.set_viewport(vx as f32, vy as f32, vw as f32, vh as f32, 0.0, 1.0);
+            pass.set_scissor_rect(vx, vy, vw, vh);
+            if self.solid_draw {
+                pass.set_pipeline(&self.solid_pipeline);
+                pass.draw(0..3, 0..1);
+            } else if let Some(frame) = frame {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &frame.bindings, &[]);
                 pass.draw(0..3, 0..1);
@@ -468,6 +513,13 @@ impl Presenter {
         }
         self.queue.submit([encoder.finish()]);
         output.present();
+        self.present_count = self.present_count.wrapping_add(1);
+        if self.present_count % 120 == 0 {
+            logging::log_msg(&format!(
+                "present #{}: target={target_w}x{target_h}",
+                self.present_count
+            ));
+        }
         Ok(())
     }
 }
